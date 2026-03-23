@@ -86,3 +86,46 @@ def load_active_sessions(active_file: Path) -> list[dict]:
                 continue
 
     return sessions
+
+
+def build_project_data(
+    completed_sessions: list[dict],
+    active_sessions: list[dict],
+) -> tuple[list[tuple[str, float, bool, bool]], float]:
+    """Aggregate today's data into per-project rows.
+
+    Returns:
+        (projects, total_seconds) where projects is a list of
+        (name, total_seconds, has_completed, is_active) sorted by time desc.
+    """
+    now = datetime.now(timezone.utc).timestamp()
+
+    project_time: dict[str, float] = {}
+    project_has_completed: dict[str, bool] = {}
+    project_is_active: dict[str, bool] = {}
+
+    for s in completed_sessions:
+        proj = s.get("project", "unknown")
+        dur = s.get("duration_seconds", 0) or 0
+        project_time[proj] = project_time.get(proj, 0) + dur
+        project_has_completed[proj] = True
+
+    for s in active_sessions:
+        proj = s.get("project", "unknown")
+        start_ts = s.get("timestamp_unix", now)
+        elapsed = max(0, now - start_ts)
+        project_time[proj] = project_time.get(proj, 0) + elapsed
+        project_is_active[proj] = True
+
+    total = sum(project_time.values())
+
+    projects = sorted(
+        [
+            (name, secs, project_has_completed.get(name, False), project_is_active.get(name, False))
+            for name, secs in project_time.items()
+        ],
+        key=lambda x: x[1],
+        reverse=True,
+    )
+
+    return projects, total

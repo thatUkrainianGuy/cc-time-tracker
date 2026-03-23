@@ -143,3 +143,70 @@ class TestLoadActiveSessions:
         assert len(result) == 2
         assert result[0]["project"] == "proj-a"
         assert result[1]["project"] == "proj-b"
+
+
+class TestBuildProjectData:
+    def setup_method(self):
+        self.mod = load_menubar()
+
+    def _now_unix(self):
+        return datetime.now(timezone.utc).timestamp()
+
+    def test_empty_inputs(self):
+        projects, total = self.mod.build_project_data([], [])
+        assert projects == []
+        assert total == 0
+
+    def test_completed_sessions_only(self):
+        sessions = [
+            {"project": "proj-a", "duration_seconds": 3600},
+            {"project": "proj-a", "duration_seconds": 1800},
+            {"project": "proj-b", "duration_seconds": 600},
+        ]
+        projects, total = self.mod.build_project_data(sessions, [])
+        assert total == 6000
+        # Sorted descending by time
+        assert projects[0] == ("proj-a", 5400, True, False)
+        assert projects[1] == ("proj-b", 600, True, False)
+
+    def test_active_sessions_add_elapsed(self):
+        now = self._now_unix()
+        sessions = []
+        active = [
+            {"project": "proj-a", "timestamp_unix": now - 600},
+        ]
+        projects, total = self.mod.build_project_data(sessions, active)
+        assert len(projects) == 1
+        name, secs, has_completed, is_active = projects[0]
+        assert name == "proj-a"
+        assert is_active is True
+        assert 595 <= secs <= 610
+
+    def test_multiple_active_sessions_same_project(self):
+        now = self._now_unix()
+        sessions = []
+        active = [
+            {"project": "proj-a", "timestamp_unix": now - 600},
+            {"project": "proj-a", "timestamp_unix": now - 300},
+        ]
+        projects, total = self.mod.build_project_data(sessions, active)
+        assert len(projects) == 1
+        name, secs, _, is_active = projects[0]
+        assert name == "proj-a"
+        assert is_active is True
+        assert 895 <= secs <= 910
+
+    def test_combined_completed_and_active(self):
+        now = self._now_unix()
+        sessions = [
+            {"project": "proj-a", "duration_seconds": 3600},
+        ]
+        active = [
+            {"project": "proj-a", "timestamp_unix": now - 600},
+        ]
+        projects, total = self.mod.build_project_data(sessions, active)
+        assert len(projects) == 1
+        name, secs, _, is_active = projects[0]
+        assert name == "proj-a"
+        assert is_active is True
+        assert 4195 <= secs <= 4210
