@@ -114,3 +114,32 @@ class TestLoadTodaySessions:
         self.sessions_file.write_text("\n".join(lines) + "\n")
         result = self.mod.load_today_sessions(self.sessions_file)
         assert len(result) == 1
+
+
+class TestLoadActiveSessions:
+    def setup_method(self):
+        self.mod = load_menubar()
+        self.tmpdir = tempfile.mkdtemp()
+        self.active_file = Path(self.tmpdir) / "active.jsonl"
+
+    def test_empty_file(self):
+        self.active_file.write_text("")
+        result = self.mod.load_active_sessions(self.active_file)
+        assert result == []
+
+    def test_no_file(self):
+        nonexistent = Path(self.tmpdir) / "nope.jsonl"
+        result = self.mod.load_active_sessions(nonexistent)
+        assert result == []
+
+    def test_loads_all_records(self):
+        now = datetime.now(timezone.utc).timestamp()
+        lines = [
+            make_start_record("s1", "proj-a", "/tmp/proj-a", now - 3600),
+            make_start_record("s2", "proj-b", "/tmp/proj-b", now - 600),
+        ]
+        self.active_file.write_text("\n".join(lines) + "\n")
+        result = self.mod.load_active_sessions(self.active_file)
+        assert len(result) == 2
+        assert result[0]["project"] == "proj-a"
+        assert result[1]["project"] == "proj-b"

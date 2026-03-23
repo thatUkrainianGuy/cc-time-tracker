@@ -63,3 +63,26 @@ def load_today_sessions(sessions_file: Path) -> list[dict]:
                 sessions.append(record)
 
     return sessions
+
+
+def load_active_sessions(active_file: Path) -> list[dict]:
+    """Load currently active sessions from JSONL file.
+
+    All records in this file are start events for running sessions.
+    Skips malformed lines silently.
+    """
+    if not active_file.exists():
+        return []
+
+    sessions = []
+    with open(active_file, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                sessions.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    return sessions
