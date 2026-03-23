@@ -178,6 +178,8 @@ def main():
     """
     try:
         import rumps
+        from AppKit import NSApplication
+        NSApplication.sharedApplication().setActivationPolicy_(1)  # NSApplicationActivationPolicyAccessory
     except ImportError:
         print("ERROR: rumps is required. Install with: pip install rumps")
         print("Then run: python3 cc-time-menubar.py")
