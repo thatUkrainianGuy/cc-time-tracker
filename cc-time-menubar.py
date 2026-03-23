@@ -203,18 +203,46 @@ def main():
             self.menu.clear()
 
             for name, secs, _has_completed, is_active in projects:
-                prefix = "● " if is_active else "  "
-                label = f"{prefix}{name}    {format_duration(secs)}"
-                item = rumps.MenuItem(label, callback=None)
+                prefix = "🟢 " if is_active else "⚪ "
+                label = f"{prefix}{name}\t{format_duration(secs)}"
+                if is_active:
+                    item = rumps.MenuItem(label, callback=lambda _: None)
+                else:
+                    item = rumps.MenuItem(label)
+                    delete_today = rumps.MenuItem(
+                        "Delete today's sessions",
+                        callback=lambda _, p=name: self._delete_sessions(p, today_only=True),
+                    )
+                    delete_all = rumps.MenuItem(
+                        "Delete all sessions",
+                        callback=lambda _, p=name: self._delete_sessions(p, today_only=False),
+                    )
+                    item.add(delete_today)
+                    item.add(delete_all)
                 self.menu.add(item)
 
             if projects:
                 self.menu.add(rumps.separator)
 
-            total_item = rumps.MenuItem(f"  Today: {format_duration(total)}", callback=None)
+            total_item = rumps.MenuItem(f"Today: {format_duration(total)}", callback=None)
             self.menu.add(total_item)
             self.menu.add(rumps.separator)
             self.menu.add(rumps.MenuItem("Quit", callback=self.quit_app))
+
+        def _delete_sessions(self, project, today_only):
+            scope = "today's" if today_only else "ALL"
+            msg = f"Delete {scope} sessions for '{project}'?"
+            if not today_only:
+                msg += "\nThis cannot be undone."
+            response = rumps.alert(
+                title="Confirm Delete",
+                message=msg,
+                ok="Delete",
+                cancel="Cancel",
+            )
+            if response == 1:  # OK clicked
+                delete_project_sessions(SESSIONS_FILE, project, today_only)
+                self.refresh(None)
 
         def quit_app(self, _):
             rumps.quit_application()
