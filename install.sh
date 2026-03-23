@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 #
-# install.sh — Install Claude Code time tracker hooks
+# install.sh — Install Claude Code time tracker hooks (standalone/curl method)
+#
+# ┌──────────────────────────────────────────────────────────────────┐
+# │  Prefer: pip install cc-time-tracker && cc-time-setup           │
+# │  This script is for users who don't want to use pip.            │
+# └──────────────────────────────────────────────────────────────────┘
 #
 # What it does:
 #   1. Copies hook scripts to ~/.claude/hooks/
-#   2. Installs cc-time-report to ~/.local/bin/ (or /usr/local/bin)
+#   2. Installs cc-time-report to ~/.local/bin/
 #   3. Merges hook config into ~/.claude/settings.json
 #   4. Creates the tracking directory
 #
@@ -26,7 +31,8 @@ DIM='\033[2m'
 BOLD='\033[1m'
 RESET='\033[0m'
 
-echo -e "${BOLD}Claude Code Time Tracker — Installer${RESET}\n"
+echo -e "${BOLD}Claude Code Time Tracker — Standalone Installer${RESET}"
+echo -e "${DIM}Prefer: pip install cc-time-tracker && cc-time-setup${RESET}\n"
 
 # ── 1. Create directories ────────────────────────────────────────────
 echo -e "${DIM}Creating directories...${RESET}"
@@ -36,71 +42,88 @@ mkdir -p "$BIN_DIR"
 
 # ── 2. Copy hook scripts ─────────────────────────────────────────────
 echo -e "${DIM}Installing hook scripts to ${HOOKS_DIR}/${RESET}"
-cp "$SCRIPT_DIR/cc-time-start.py" "$HOOKS_DIR/cc-time-start.py"
-cp "$SCRIPT_DIR/cc-time-end.py" "$HOOKS_DIR/cc-time-end.py"
+cp "$SCRIPT_DIR/src/cc_time_tracker/start_hook.py" "$HOOKS_DIR/cc-time-start.py"
+cp "$SCRIPT_DIR/src/cc_time_tracker/end_hook.py" "$HOOKS_DIR/cc-time-end.py"
 chmod +x "$HOOKS_DIR/cc-time-start.py"
 chmod +x "$HOOKS_DIR/cc-time-end.py"
 
 # ── 3. Install report CLI ────────────────────────────────────────────
 echo -e "${DIM}Installing cc-time-report to ${BIN_DIR}/${RESET}"
-cp "$SCRIPT_DIR/cc-time-report.py" "$BIN_DIR/cc-time-report"
+cp "$SCRIPT_DIR/src/cc_time_tracker/report.py" "$BIN_DIR/cc-time-report"
 chmod +x "$BIN_DIR/cc-time-report"
 
 # ── 4. Merge hooks into settings.json ────────────────────────────────
 echo -e "${DIM}Configuring hooks in ${SETTINGS_FILE}${RESET}"
 
 if [ ! -f "$SETTINGS_FILE" ]; then
-    # No existing settings — just copy our config
-    cp "$SCRIPT_DIR/hooks-config.json" "$SETTINGS_FILE"
-    echo -e "${GREEN}✓ Created ${SETTINGS_FILE} with time-tracking hooks${RESET}"
+    # No existing settings — create with our hooks
+    python3 << 'PYCREATE'
+import json
+from pathlib import Path
+
+settings = {
+    "hooks": {
+        "SessionStart": [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 ~/.claude/hooks/cc-time-start.py",
+                "timeout": 5
+            }]
+        }],
+        "SessionEnd": [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 ~/.claude/hooks/cc-time-end.py",
+                "timeout": 5
+            }]
+        }]
+    }
+}
+
+settings_path = Path.home() / ".claude" / "settings.json"
+settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+print("✓ Created settings.json with time-tracking hooks")
+PYCREATE
+
 else
     # Existing settings — need to merge
-    # Use Python for safe JSON merging
     python3 << 'PYMERGE'
 import json
-import sys
 from pathlib import Path
 
 settings_path = Path.home() / ".claude" / "settings.json"
-hooks_config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else None
 
 with open(settings_path) as f:
     settings = json.load(f)
 
 new_hooks = {
-    "SessionStart": [
-        {
-            "matcher": "",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": "python3 ~/.claude/hooks/cc-time-start.py",
-                    "timeout": 5
-                }
-            ]
-        }
-    ],
-    "SessionEnd": [
-        {
-            "matcher": "",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": "python3 ~/.claude/hooks/cc-time-end.py",
-                    "timeout": 5
-                }
-            ]
-        }
-    ]
+    "SessionStart": [{
+        "matcher": "",
+        "hooks": [{
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/cc-time-start.py",
+            "timeout": 5
+        }]
+    }],
+    "SessionEnd": [{
+        "matcher": "",
+        "hooks": [{
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/cc-time-end.py",
+            "timeout": 5
+        }]
+    }]
 }
 
 if "hooks" not in settings:
     settings["hooks"] = {}
 
-# Check if already installed
+# Check if already installed (both old-style and new pip-style)
 existing_start = settings["hooks"].get("SessionStart", [])
 already_installed = any(
-    "cc-time-start" in str(h)
+    "cc-time-start" in str(h) or "cc_time_tracker" in str(h)
     for group in existing_start
     for h in group.get("hooks", [])
 )
@@ -108,7 +131,6 @@ already_installed = any(
 if already_installed:
     print("⚠ Time-tracking hooks already present in settings.json — skipping merge")
 else:
-    # Append our hooks (don't overwrite existing SessionStart/End hooks)
     for event, hook_configs in new_hooks.items():
         if event not in settings["hooks"]:
             settings["hooks"][event] = []
@@ -140,10 +162,6 @@ fi
 
 # ── Done ──────────────────────────────────────────────────────────────
 echo -e "\n${GREEN}${BOLD}✓ Installation complete!${RESET}\n"
-echo -e "  ${BOLD}How it works:${RESET}"
-echo -e "  • Every time you launch Claude Code, time starts tracking automatically"
-echo -e "  • When you /exit or Ctrl+D, the session duration is recorded"
-echo -e "  • Multiple concurrent sessions are tracked independently\n"
 echo -e "  ${BOLD}Commands:${RESET}"
 echo -e "  cc-time-report              Last 7 days summary"
 echo -e "  cc-time-report today        Today only"
