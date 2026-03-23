@@ -15,6 +15,7 @@ Three Python scripts, an installer, and a hooks config:
 - **`cc-time-report.py`** — CLI report tool (installed as `cc-time-report`). Reads `sessions.jsonl` and `active.jsonl`, supports subcommands: `today`, `week`, `month`, `all`, `project <name>`, `active`, `csv`, `orphans`, `raw`.
 - **`install.sh`** — Copies hooks to `~/.claude/hooks/`, installs report CLI to `~/.local/bin/`, merges hook config into `~/.claude/settings.json`.
 - **`hooks-config.json`** — Hook definitions for SessionStart/SessionEnd with 5s timeout.
+- **`cc-time-menubar.py`** — macOS menu bar app (requires `pip install rumps`). Shows today's total time in the menu bar, click for per-project breakdown with active session indicators. Reads JSONL files directly every 30s.
 
 ## Key Data Paths (at runtime)
 
