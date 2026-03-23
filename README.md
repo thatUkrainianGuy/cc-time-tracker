@@ -2,37 +2,14 @@
 
 Automatically tracks time spent in Claude Code sessions per project, using the native hooks system.
 
-## How It Works
-
-```
-You launch CC in ~/projects/streetkast/
-  → SessionStart hook fires
-  → Records: {session_id, project: "streetkast", start_time}
-
-You work for 45 minutes, then /exit
-  → SessionEnd hook fires
-  → Calculates: 45m 12s
-  → Writes completed session to ~/.claude/time-tracking/sessions.jsonl
-
-Meanwhile, another CC instance is running in ~/projects/crewshift/
-  → Tracked independently (different session_id)
-  → Both durations are summed per-project in reports
-```
-
-## Installation
+## Quick Start
 
 ```bash
-git clone <this-repo> ~/cc-time-tracker  # or copy the files
-cd ~/cc-time-tracker
-chmod +x install.sh
-./install.sh
+pip install cc-time-tracker
+cc-time-setup
 ```
 
-The installer:
-1. Copies hook scripts to `~/.claude/hooks/`
-2. Installs `cc-time-report` to `~/.local/bin/`
-3. Safely merges hooks into `~/.claude/settings.json`
-4. Creates `~/.claude/time-tracking/` directory
+That's it. Every Claude Code session is now timed automatically.
 
 ## Usage
 
@@ -47,6 +24,7 @@ cc-time-report active       # Show currently running sessions
 cc-time-report csv          # Export as CSV (pipe to file)
 cc-time-report orphans      # Find sessions that started but never ended
 cc-time-report raw          # Raw JSONL dump
+cc-time-report --version    # Show version
 ```
 
 ## Example Output
@@ -72,20 +50,47 @@ Last 7 Days
   TOTAL              15h 32m     15.53h        30
 ```
 
-## Data Format
+## How It Works
 
-Sessions are stored in `~/.claude/time-tracking/sessions.jsonl`:
-
-```jsonl
-{"event":"start","session_id":"abc123","cwd":"/home/igor/projects/streetkast","project":"streetkast","source":"startup","timestamp":"2026-03-23T10:00:00+00:00","timestamp_unix":1711184400.0}
-{"event":"end","session_id":"abc123","cwd":"/home/igor/projects/streetkast","project":"streetkast","reason":"user_exit","timestamp":"2026-03-23T10:45:12+00:00","timestamp_unix":1711187112.0,"duration_seconds":2712.0}
 ```
+You launch CC in ~/projects/streetkast/
+  → SessionStart hook fires
+  → Records: {session_id, project: "streetkast", start_time}
+
+You work for 45 minutes, then /exit
+  → SessionEnd hook fires
+  → Calculates: 45m 12s
+  → Writes completed session to ~/.claude/time-tracking/sessions.jsonl
+
+Meanwhile, another CC instance is running in ~/projects/crewshift/
+  → Tracked independently (different session_id)
+  → Both durations are summed per-project in reports
+```
+
+`cc-time-setup` registers two hooks in `~/.claude/settings.json`:
+- **SessionStart** → `python3 -m cc_time_tracker.start_hook`
+- **SessionEnd** → `python3 -m cc_time_tracker.end_hook`
+
+Sessions are stored in `~/.claude/time-tracking/sessions.jsonl` (append-only JSONL).
+
+## Alternative Install (curl)
+
+If you prefer not to use pip, the bash installer still works:
+
+```bash
+git clone https://github.com/riabchuk/cc-time-tracker.git ~/cc-time-tracker
+cd ~/cc-time-tracker
+chmod +x install.sh
+./install.sh
+```
+
+> **Note:** Don't mix both methods. Use `cc-time-setup` for pip installs and `install.sh` for standalone installs.
 
 ## Multiple Instances
 
 Each Claude Code session gets a unique `session_id`. If you run 3 instances:
 - Terminal 1: `cd ~/streetkast && claude` → session A starts
-- Terminal 2: `cd ~/crewshift && claude` → session B starts  
+- Terminal 2: `cd ~/crewshift && claude` → session B starts
 - Terminal 3: `cd ~/streetkast && claude` → session C starts
 
 All three track independently. The report sums A+C under "streetkast" and B under "crewshift".
@@ -99,16 +104,32 @@ All three track independently. The report sums A+C under "streetkast" and B unde
 
 ## Optional: filelock
 
-For maximum safety with many concurrent sessions, install `filelock`:
+For maximum safety with many concurrent sessions:
 
 ```bash
-pip install filelock
+pip install cc-time-tracker[lock]
 ```
 
 Without it, the scripts still work (race conditions are extremely unlikely with JSONL appends on modern filesystems).
 
+## Optional: Menu Bar App (macOS)
+
+A standalone menu bar app shows today's total time:
+
+```bash
+pip install rumps
+python3 cc-time-menubar.py
+```
+
 ## Uninstall
 
+**pip install:**
+```bash
+cc-time-uninstall
+pip uninstall cc-time-tracker
+```
+
+**Standalone install:**
 ```bash
 rm ~/.claude/hooks/cc-time-start.py
 rm ~/.claude/hooks/cc-time-end.py
@@ -119,4 +140,4 @@ rm ~/.local/bin/cc-time-report
 
 ## License
 
-Do whatever you want with it.
+MIT
