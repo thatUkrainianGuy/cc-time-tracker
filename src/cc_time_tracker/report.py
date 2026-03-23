@@ -7,7 +7,10 @@ from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
 from cc_time_tracker import __version__
-from cc_time_tracker.common import SESSIONS_FILE, ACTIVE_FILE, load_jsonl
+from cc_time_tracker.common import (
+    SESSIONS_FILE, ACTIVE_FILE, load_jsonl,
+    BOLD, DIM, GREEN, CYAN, YELLOW, RED, RESET, UNDERLINE,
+)
 
 
 def load_sessions() -> list[dict]:
@@ -90,15 +93,6 @@ def aggregate_by_day(sessions: list[dict]) -> dict[str, dict[str, float]]:
 
 
 # ─── Display Functions ────────────────────────────────────────────────
-
-BOLD = "\033[1m"
-DIM = "\033[2m"
-GREEN = "\033[32m"
-CYAN = "\033[36m"
-YELLOW = "\033[33m"
-RED = "\033[31m"
-RESET = "\033[0m"
-UNDERLINE = "\033[4m"
 
 
 def print_header(title: str):
@@ -247,6 +241,11 @@ def main():
 
     command = args[0] if args else "summary"
 
+    if command == "active":
+        print_active_sessions()
+        print()
+        return
+
     records = load_sessions()
     completed = get_completed_sessions(records)
 
@@ -284,9 +283,6 @@ def main():
         print_project_table(projects, f"Project: {name}")
         print_daily_breakdown(days)
 
-    elif command == "active":
-        print_active_sessions()
-
     elif command == "orphans":
         print_orphans(records)
 
@@ -297,7 +293,7 @@ def main():
         for r in records:
             print(json.dumps(r))
 
-    elif command in ("summary", "default"):
+    elif command == "summary":
         # Last 7 days summary
         week_ago = datetime.now(timezone.utc) - timedelta(days=7)
         filtered = filter_by_time(completed, week_ago)

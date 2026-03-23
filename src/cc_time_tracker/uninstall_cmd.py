@@ -4,16 +4,10 @@ import json
 import sys
 from pathlib import Path
 
-from cc_time_tracker.common import TRACKING_DIR
-
-SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
-
-BOLD = "\033[1m"
-GREEN = "\033[32m"
-YELLOW = "\033[33m"
-RED = "\033[31m"
-DIM = "\033[2m"
-RESET = "\033[0m"
+from cc_time_tracker.common import (
+    TRACKING_DIR, SETTINGS_FILE,
+    BOLD, GREEN, RED, DIM, RESET,
+)
 
 
 def remove_hooks(settings_file: Path) -> None:

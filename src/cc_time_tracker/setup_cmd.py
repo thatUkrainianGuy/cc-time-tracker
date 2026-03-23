@@ -4,20 +4,25 @@ import json
 import sys
 from pathlib import Path
 
-from cc_time_tracker.common import TRACKING_DIR, ensure_dir
+from cc_time_tracker.common import (
+    TRACKING_DIR, SETTINGS_FILE, ensure_dir,
+    BOLD, GREEN, YELLOW, DIM, RESET,
+)
 
-SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
 OLD_HOOK_FILES = [
     Path.home() / ".claude" / "hooks" / "cc-time-start.py",
     Path.home() / ".claude" / "hooks" / "cc-time-end.py",
 ]
 OLD_BIN_FILE = Path.home() / ".local" / "bin" / "cc-time-report"
 
-BOLD = "\033[1m"
-GREEN = "\033[32m"
-YELLOW = "\033[33m"
-DIM = "\033[2m"
-RESET = "\033[0m"
+
+def _has_tracker_hooks(settings: dict) -> bool:
+    """Check if cc-time-tracker hooks are already in parsed settings."""
+    for group in settings.get("hooks", {}).get("SessionStart", []):
+        for hook in group.get("hooks", []):
+            if "cc_time_tracker" in hook.get("command", ""):
+                return True
+    return False
 
 
 def is_already_installed(settings_file: Path) -> bool:
@@ -28,11 +33,7 @@ def is_already_installed(settings_file: Path) -> bool:
         settings = json.loads(settings_file.read_text())
     except (json.JSONDecodeError, OSError):
         return False
-    for group in settings.get("hooks", {}).get("SessionStart", []):
-        for hook in group.get("hooks", []):
-            if "cc_time_tracker" in hook.get("command", ""):
-                return True
-    return False
+    return _has_tracker_hooks(settings)
 
 
 def merge_hooks(settings_file: Path, python_path: str) -> None:
@@ -45,7 +46,7 @@ def merge_hooks(settings_file: Path, python_path: str) -> None:
     else:
         settings = {}
 
-    if is_already_installed(settings_file):
+    if _has_tracker_hooks(settings):
         print(f"  {YELLOW}⚠ Hooks already registered — skipping{RESET}")
         return
 

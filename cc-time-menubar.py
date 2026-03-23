@@ -74,40 +74,36 @@ def delete_project_sessions(
 
     Returns number of records removed.
     """
-    try:
-        raw_lines = sessions_file.read_text().strip().split("\n")
-    except FileNotFoundError:
-        return 0
-
-    if not any(l.strip() for l in raw_lines):
+    if not sessions_file.exists():
         return 0
 
     today_start = get_today_start_unix() if today_only else None
-    kept_lines = []
-    removed = 0
+    lock_path = sessions_file.parent / ".lock"
 
-    for line in raw_lines:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        try:
-            record = json.loads(stripped)
-        except json.JSONDecodeError:
-            kept_lines.append(stripped)
-            continue
+    with _acquire_lock(lock_path):
+        raw = sessions_file.read_text()
+        if not raw.strip():
+            return 0
 
-        if record.get("project") == project:
-            if today_only:
-                if record.get("timestamp_unix", 0) >= today_start:
+        kept_lines = []
+        removed = 0
+
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                kept_lines.append(line)
+                continue
+
+            if record.get("project") == project:
+                if not today_only or record.get("timestamp_unix", 0) >= today_start:
                     removed += 1
                     continue
-            else:
-                removed += 1
-                continue
-        kept_lines.append(stripped)
+            kept_lines.append(line)
 
-    lock_path = sessions_file.parent / ".lock"
-    with _acquire_lock(lock_path):
         sessions_file.write_text("\n".join(kept_lines) + "\n" if kept_lines else "")
 
     return removed
@@ -199,7 +195,8 @@ def main():
             active = load_active_sessions(ACTIVE_FILE)
             projects, total = build_project_data(completed, active)
 
-            self.title = f"⏱ {format_duration(total)}"
+            icon = "⏱" if active else "⏸"
+            self.title = f"{icon} {format_duration(total)}"
             self.menu.clear()
 
             for name, secs, _has_completed, is_active in projects:
@@ -214,8 +211,8 @@ def main():
                         callback=lambda _, p=name: self._delete_sessions(p, today_only=True),
                     )
                     delete_all = rumps.MenuItem(
-                        "Delete all sessions",
-                        callback=lambda _, p=name: self._delete_sessions(p, today_only=False),
+                        "Delete project",
+                        callback=lambda _, p=name: self._delete_project(p),
                     )
                     item.add(delete_today)
                     item.add(delete_all)
@@ -229,20 +226,43 @@ def main():
             self.menu.add(rumps.separator)
             self.menu.add(rumps.MenuItem("Quit", callback=self.quit_app))
 
+        def _schedule_refresh(self):
+            """Defer refresh to next run loop iteration to avoid mutating menu mid-callback."""
+            t = rumps.Timer(self._deferred_refresh, 0.1)
+            t.start()
+
+        def _deferred_refresh(self, timer):
+            timer.stop()
+            self.refresh(None)
+
+        def _bring_to_front(self):
+            from AppKit import NSApplication, NSApplicationActivateIgnoringOtherApps
+            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+
         def _delete_sessions(self, project, today_only):
-            scope = "today's" if today_only else "ALL"
-            msg = f"Delete {scope} sessions for '{project}'?"
-            if not today_only:
-                msg += "\nThis cannot be undone."
+            self._bring_to_front()
             response = rumps.alert(
                 title="Confirm Delete",
-                message=msg,
+                message=f"Delete today's sessions for '{project}'?",
                 ok="Delete",
                 cancel="Cancel",
             )
-            if response == 1:  # OK clicked
-                delete_project_sessions(SESSIONS_FILE, project, today_only)
-                self.refresh(None)
+            if response == 1:
+                delete_project_sessions(SESSIONS_FILE, project, today_only=True)
+                self._schedule_refresh()
+
+        def _delete_project(self, project):
+            self._bring_to_front()
+            response = rumps.alert(
+                title="Confirm Delete",
+                message=f"Delete ALL data for '{project}'?\nThis cannot be undone.",
+                ok="Delete",
+                cancel="Cancel",
+            )
+            if response == 1:
+                delete_project_sessions(SESSIONS_FILE, project, today_only=False)
+                delete_project_sessions(ACTIVE_FILE, project, today_only=False)
+                self._schedule_refresh()
 
         def quit_app(self, _):
             rumps.quit_application()

@@ -4,7 +4,6 @@ import json
 from io import StringIO
 from unittest.mock import patch
 
-from cc_time_tracker.common import ACTIVE_FILE, SESSIONS_FILE
 from cc_time_tracker.start_hook import main
 
 
@@ -24,10 +23,8 @@ def test_start_hook_writes_records(tmp_path):
         patch("cc_time_tracker.common.SESSIONS_FILE", sessions),
         patch("cc_time_tracker.common.ACTIVE_FILE", active),
         patch("cc_time_tracker.common.LOCK_FILE", tmp_path / ".lock"),
-        patch("cc_time_tracker.start_hook.TRACKING_DIR", tmp_path),
         patch("cc_time_tracker.start_hook.SESSIONS_FILE", sessions),
         patch("cc_time_tracker.start_hook.ACTIVE_FILE", active),
-        patch("cc_time_tracker.start_hook.LOCK_FILE", tmp_path / ".lock"),
         patch("sys.stdin", StringIO(input_data)),
     ):
         try:

@@ -32,14 +32,11 @@ def test_end_hook_calculates_duration(tmp_path):
     })
 
     with (
-        patch("cc_time_tracker.common.TRACKING_DIR", tmp_path),
         patch("cc_time_tracker.common.SESSIONS_FILE", sessions),
         patch("cc_time_tracker.common.ACTIVE_FILE", active),
         patch("cc_time_tracker.common.LOCK_FILE", tmp_path / ".lock"),
-        patch("cc_time_tracker.end_hook.TRACKING_DIR", tmp_path),
         patch("cc_time_tracker.end_hook.SESSIONS_FILE", sessions),
         patch("cc_time_tracker.end_hook.ACTIVE_FILE", active),
-        patch("cc_time_tracker.end_hook.LOCK_FILE", tmp_path / ".lock"),
         patch("sys.stdin", StringIO(input_data)),
     ):
         try:
@@ -71,14 +68,11 @@ def test_end_hook_no_matching_start(tmp_path):
     })
 
     with (
-        patch("cc_time_tracker.common.TRACKING_DIR", tmp_path),
         patch("cc_time_tracker.common.SESSIONS_FILE", sessions),
         patch("cc_time_tracker.common.ACTIVE_FILE", active),
         patch("cc_time_tracker.common.LOCK_FILE", tmp_path / ".lock"),
-        patch("cc_time_tracker.end_hook.TRACKING_DIR", tmp_path),
         patch("cc_time_tracker.end_hook.SESSIONS_FILE", sessions),
         patch("cc_time_tracker.end_hook.ACTIVE_FILE", active),
-        patch("cc_time_tracker.end_hook.LOCK_FILE", tmp_path / ".lock"),
         patch("sys.stdin", StringIO(input_data)),
     ):
         try:

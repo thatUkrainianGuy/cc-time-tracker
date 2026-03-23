@@ -6,7 +6,7 @@ import sys
 from datetime import datetime, timezone
 
 from cc_time_tracker.common import (
-    TRACKING_DIR, SESSIONS_FILE, ACTIVE_FILE, LOCK_FILE,
+    SESSIONS_FILE, ACTIVE_FILE,
     ensure_dir, acquire_lock, extract_project_name,
 )
 

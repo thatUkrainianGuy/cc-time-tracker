@@ -9,6 +9,17 @@ TRACKING_DIR = Path.home() / ".claude" / "time-tracking"
 SESSIONS_FILE = TRACKING_DIR / "sessions.jsonl"
 ACTIVE_FILE = TRACKING_DIR / "active.jsonl"
 LOCK_FILE = TRACKING_DIR / ".lock"
+SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
+
+# ANSI escape codes
+BOLD = "\033[1m"
+DIM = "\033[2m"
+GREEN = "\033[32m"
+CYAN = "\033[36m"
+YELLOW = "\033[33m"
+RED = "\033[31m"
+RESET = "\033[0m"
+UNDERLINE = "\033[4m"
 
 
 def ensure_dir(path: Path | None = None) -> None:
@@ -35,10 +46,12 @@ def extract_project_name(cwd: str) -> str:
 
 def load_jsonl(path: Path) -> list[dict]:
     """Read a JSONL file, returning a list of parsed dicts. Skips bad lines."""
-    if not path.exists():
+    try:
+        f = open(path, "r")
+    except FileNotFoundError:
         return []
     records = []
-    with open(path, "r") as f:
+    with f:
         for line in f:
             line = line.strip()
             if not line:

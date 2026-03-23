@@ -15,7 +15,7 @@ Three Python scripts, an installer, and a hooks config:
 - **`cc-time-report.py`** — CLI report tool (installed as `cc-time-report`). Reads `sessions.jsonl` and `active.jsonl`, supports subcommands: `today`, `week`, `month`, `all`, `project <name>`, `active`, `csv`, `orphans`, `raw`.
 - **`install.sh`** — Copies hooks to `~/.claude/hooks/`, installs report CLI to `~/.local/bin/`, merges hook config into `~/.claude/settings.json`.
 - **`hooks-config.json`** — Hook definitions for SessionStart/SessionEnd with 5s timeout.
-- **`cc-time-menubar.py`** — macOS menu bar app (requires `pip install rumps`). Shows today's total time in the menu bar, click for per-project breakdown with active session indicators. Reads JSONL files directly every 30s.
+- **`cc-time-menubar.py`** — macOS menu bar app (requires `pip install rumps`). Shows today's total time in the menu bar with emoji indicators (🟢 active, ⚪ inactive), per-project breakdown, and delete submenus for inactive projects. Reads JSONL files directly every 30s. **Intentionally standalone** — duplicates utilities like `_read_jsonl` and `_acquire_lock` rather than importing from `src/` to avoid package dependencies.
 
 ## Key Data Paths (at runtime)
 
@@ -25,21 +25,23 @@ Three Python scripts, an installer, and a hooks config:
 
 ## Concurrency Model
 
-Both hooks use optional `filelock` (pip package). Without it, a no-op context manager is used — safe enough for JSONL appends on modern filesystems but not guaranteed under heavy concurrent writes.
+Both hooks use optional `filelock` (pip package). Without it, a no-op context manager is used — safe enough for JSONL appends on modern filesystems but not guaranteed under heavy concurrent writes. For read-modify-write operations (e.g. `delete_project_sessions`), the entire read+filter+write cycle must be inside the lock to avoid TOCTOU races.
 
 ## Testing
 
-No test suite exists. To manually test:
+- Run menubar tests: `python3 -m pytest tests/test_menubar.py -v`
+- `tests/test_menubar.py` uses `SourceFileLoader` to import `cc-time-menubar.py` (hyphenated filename can't be a normal import)
+- Hook scripts have no automated tests. Manual test:
 ```bash
-# Simulate a SessionStart
 echo '{"session_id":"test123","cwd":"/tmp/test-project","source":"startup"}' | python3 cc-time-start.py
-
-# Simulate a SessionEnd
 echo '{"session_id":"test123","cwd":"/tmp/test-project","reason":"user_exit"}' | python3 cc-time-end.py
-
-# Check results
 python3 cc-time-report.py
 ```
+
+## Environment
+
+- System python3 is 3.14 (Homebrew). `pip3` points to 3.9 — always use `python3 -m pip`.
+- `--break-system-packages` required for pip installs (PEP 668).
 
 ## Important Constraints
 
