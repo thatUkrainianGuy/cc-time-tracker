@@ -64,3 +64,53 @@ class TestFormatDuration:
 
     def test_exact_hour(self):
         assert self.mod.format_duration(3600) == "1h 0m"
+
+
+class TestLoadTodaySessions:
+    def setup_method(self):
+        self.mod = load_menubar()
+        self.tmpdir = tempfile.mkdtemp()
+        self.sessions_file = Path(self.tmpdir) / "sessions.jsonl"
+
+    def _now_unix(self):
+        return datetime.now(timezone.utc).timestamp()
+
+    def _today_start_unix(self):
+        """Midnight local time today, as unix timestamp."""
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        return today.timestamp()
+
+    def test_empty_file(self):
+        self.sessions_file.write_text("")
+        result = self.mod.load_today_sessions(self.sessions_file)
+        assert result == []
+
+    def test_no_file(self):
+        nonexistent = Path(self.tmpdir) / "nope.jsonl"
+        result = self.mod.load_today_sessions(nonexistent)
+        assert result == []
+
+    def test_filters_to_today_end_events(self):
+        now = self._now_unix()
+        yesterday = now - 86400 * 2
+        lines = [
+            make_start_record("s1", "proj", "/tmp/proj", now - 3600),
+            make_end_record("s1", "proj", "/tmp/proj", now, 3600),
+            make_end_record("s2", "old", "/tmp/old", yesterday, 100),
+        ]
+        self.sessions_file.write_text("\n".join(lines) + "\n")
+        result = self.mod.load_today_sessions(self.sessions_file)
+        assert len(result) == 1
+        assert result[0]["project"] == "proj"
+        assert result[0]["event"] == "end"
+
+    def test_skips_malformed_lines(self):
+        now = self._now_unix()
+        lines = [
+            "not json at all",
+            make_end_record("s1", "proj", "/tmp/proj", now, 100),
+            "{broken json",
+        ]
+        self.sessions_file.write_text("\n".join(lines) + "\n")
+        result = self.mod.load_today_sessions(self.sessions_file)
+        assert len(result) == 1

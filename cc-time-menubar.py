@@ -10,6 +10,10 @@ Usage:
 Requires: pip install rumps
 """
 
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
 
 def format_duration(seconds: float) -> str:
     """Format seconds into menu-bar-friendly duration string.
@@ -23,3 +27,39 @@ def format_duration(seconds: float) -> str:
     hours = total_minutes // 60
     minutes = total_minutes % 60
     return f"{hours}h {minutes}m"
+
+
+def get_today_start_unix() -> float:
+    """Get midnight local time today as a unix timestamp."""
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    return today.timestamp()
+
+
+def load_today_sessions(sessions_file: Path) -> list[dict]:
+    """Load today's completed sessions (end events only) from JSONL file.
+
+    Uses local time for 'today' cutoff. Skips malformed lines silently.
+    """
+    if not sessions_file.exists():
+        return []
+
+    today_start = get_today_start_unix()
+    sessions = []
+
+    with open(sessions_file, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (
+                record.get("event") == "end"
+                and record.get("duration_seconds") is not None
+                and record.get("timestamp_unix", 0) >= today_start
+            ):
+                sessions.append(record)
+
+    return sessions
