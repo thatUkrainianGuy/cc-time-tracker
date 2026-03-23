@@ -14,13 +14,14 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+TRACKING_DIR = Path.home() / ".claude" / "time-tracking"
+SESSIONS_FILE = TRACKING_DIR / "sessions.jsonl"
+ACTIVE_FILE = TRACKING_DIR / "active.jsonl"
+REFRESH_INTERVAL = 30  # seconds
+
 
 def format_duration(seconds: float) -> str:
-    """Format seconds into menu-bar-friendly duration string.
-
-    Unlike cc-time-report.py, this skips seconds entirely to avoid
-    visual noise in the menu bar. Always shows at least '0m'.
-    """
+    """Skips seconds (unlike cc-time-report.py) to avoid menu bar noise."""
     total_minutes = int(seconds // 60)
     if total_minutes < 60:
         return f"{total_minutes}m"
@@ -29,63 +30,107 @@ def format_duration(seconds: float) -> str:
     return f"{hours}h {minutes}m"
 
 
+def _read_jsonl(path: Path) -> list[dict]:
+    """Read a JSONL file, skipping malformed lines. Returns [] if file missing."""
+    try:
+        f = open(path, "r")
+    except FileNotFoundError:
+        return []
+
+    records = []
+    with f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return records
+
+
+def _acquire_lock(lock_path):
+    """Optional filelock context manager — no-op if filelock not installed."""
+    try:
+        from filelock import FileLock
+        return FileLock(lock_path, timeout=5)
+    except ImportError:
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _noop():
+            yield
+
+        return _noop()
+
+
+def delete_project_sessions(
+    sessions_file: Path,
+    project: str,
+    today_only: bool,
+) -> int:
+    """Remove sessions for a project from the JSONL file.
+
+    Returns number of records removed.
+    """
+    try:
+        raw_lines = sessions_file.read_text().strip().split("\n")
+    except FileNotFoundError:
+        return 0
+
+    if not any(l.strip() for l in raw_lines):
+        return 0
+
+    today_start = get_today_start_unix() if today_only else None
+    kept_lines = []
+    removed = 0
+
+    for line in raw_lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            record = json.loads(stripped)
+        except json.JSONDecodeError:
+            kept_lines.append(stripped)
+            continue
+
+        if record.get("project") == project:
+            if today_only:
+                if record.get("timestamp_unix", 0) >= today_start:
+                    removed += 1
+                    continue
+            else:
+                removed += 1
+                continue
+        kept_lines.append(stripped)
+
+    lock_path = sessions_file.parent / ".lock"
+    with _acquire_lock(lock_path):
+        sessions_file.write_text("\n".join(kept_lines) + "\n" if kept_lines else "")
+
+    return removed
+
+
 def get_today_start_unix() -> float:
-    """Get midnight local time today as a unix timestamp."""
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     return today.timestamp()
 
 
 def load_today_sessions(sessions_file: Path) -> list[dict]:
-    """Load today's completed sessions (end events only) from JSONL file.
-
-    Uses local time for 'today' cutoff. Skips malformed lines silently.
-    """
-    if not sessions_file.exists():
-        return []
-
+    """Load today's completed sessions (end events only) from JSONL file."""
     today_start = get_today_start_unix()
-    sessions = []
-
-    with open(sessions_file, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if (
-                record.get("event") == "end"
-                and record.get("duration_seconds") is not None
-                and record.get("timestamp_unix", 0) >= today_start
-            ):
-                sessions.append(record)
-
-    return sessions
+    return [
+        r for r in _read_jsonl(sessions_file)
+        if r.get("event") == "end"
+        and r.get("duration_seconds") is not None
+        and r.get("timestamp_unix", 0) >= today_start
+    ]
 
 
 def load_active_sessions(active_file: Path) -> list[dict]:
-    """Load currently active sessions from JSONL file.
-
-    All records in this file are start events for running sessions.
-    Skips malformed lines silently.
-    """
-    if not active_file.exists():
-        return []
-
-    sessions = []
-    with open(active_file, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                sessions.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-
-    return sessions
+    return _read_jsonl(active_file)
 
 
 def build_project_data(
@@ -131,19 +176,9 @@ def build_project_data(
     return projects, total
 
 
-# Constants
-TRACKING_DIR = Path.home() / ".claude" / "time-tracking"
-SESSIONS_FILE = TRACKING_DIR / "sessions.jsonl"
-ACTIVE_FILE = TRACKING_DIR / "active.jsonl"
-
-REFRESH_INTERVAL = 30  # seconds
-
-
 def main():
-    """Entry point — imports rumps and runs the menu bar app.
-
-    rumps is imported here (not at module level) so that the pure functions
-    above can be imported and tested without rumps installed.
+    """rumps is imported here (not at module level) so pure functions
+    above can be tested without rumps installed.
     """
     try:
         import rumps
@@ -157,18 +192,14 @@ def main():
             super().__init__("⏱ 0m", quit_button=None)
             self.timer = rumps.Timer(self.refresh, REFRESH_INTERVAL)
             self.timer.start()
-            self.refresh(None)  # initial load
+            self.refresh(None)
 
         def refresh(self, _):
-            """Reload data from JSONL files and update the menu bar."""
             completed = load_today_sessions(SESSIONS_FILE)
             active = load_active_sessions(ACTIVE_FILE)
             projects, total = build_project_data(completed, active)
 
-            # Update title
             self.title = f"⏱ {format_duration(total)}"
-
-            # Rebuild menu
             self.menu.clear()
 
             for name, secs, _has_completed, is_active in projects:

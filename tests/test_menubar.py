@@ -1,12 +1,9 @@
 """Tests for cc-time-menubar.py data parsing and formatting logic."""
 
 import json
-import os
 import tempfile
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
-
-import pytest
 
 
 def make_start_record(session_id, project, cwd, ts_unix):
@@ -74,11 +71,6 @@ class TestLoadTodaySessions:
 
     def _now_unix(self):
         return datetime.now(timezone.utc).timestamp()
-
-    def _today_start_unix(self):
-        """Midnight local time today, as unix timestamp."""
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        return today.timestamp()
 
     def test_empty_file(self):
         self.sessions_file.write_text("")
@@ -210,3 +202,71 @@ class TestBuildProjectData:
         assert name == "proj-a"
         assert is_active is True
         assert 4195 <= secs <= 4210
+
+
+class TestDeleteProjectSessions:
+    def setup_method(self):
+        self.mod = load_menubar()
+        self.tmpdir = tempfile.mkdtemp()
+        self.sessions_file = Path(self.tmpdir) / "sessions.jsonl"
+
+    def _now_unix(self):
+        return datetime.now(timezone.utc).timestamp()
+
+    def test_delete_all_sessions_for_project(self):
+        now = self._now_unix()
+        yesterday = now - 86400 * 2
+        lines = [
+            make_start_record("s1", "proj-a", "/tmp/proj-a", now - 3600),
+            make_end_record("s1", "proj-a", "/tmp/proj-a", now, 3600),
+            make_start_record("s2", "proj-b", "/tmp/proj-b", now - 600),
+            make_end_record("s2", "proj-b", "/tmp/proj-b", now, 600),
+            make_end_record("s3", "proj-a", "/tmp/proj-a", yesterday, 100),
+        ]
+        self.sessions_file.write_text("\n".join(lines) + "\n")
+        removed = self.mod.delete_project_sessions(self.sessions_file, "proj-a", today_only=False)
+        assert removed == 3
+        remaining = self.mod._read_jsonl(self.sessions_file)
+        assert len(remaining) == 2
+        assert all(r["project"] == "proj-b" for r in remaining)
+
+    def test_delete_today_only(self):
+        now = self._now_unix()
+        yesterday = now - 86400 * 2
+        lines = [
+            make_start_record("s1", "proj-a", "/tmp/proj-a", now - 3600),
+            make_end_record("s1", "proj-a", "/tmp/proj-a", now, 3600),
+            make_end_record("s3", "proj-a", "/tmp/proj-a", yesterday, 100),
+        ]
+        self.sessions_file.write_text("\n".join(lines) + "\n")
+        removed = self.mod.delete_project_sessions(self.sessions_file, "proj-a", today_only=True)
+        assert removed == 2
+        remaining = self.mod._read_jsonl(self.sessions_file)
+        assert len(remaining) == 1
+        assert remaining[0]["timestamp_unix"] == yesterday
+
+    def test_delete_missing_file(self):
+        nonexistent = Path(self.tmpdir) / "nope.jsonl"
+        removed = self.mod.delete_project_sessions(nonexistent, "proj-a", today_only=False)
+        assert removed == 0
+
+    def test_delete_empty_file(self):
+        self.sessions_file.write_text("")
+        removed = self.mod.delete_project_sessions(self.sessions_file, "proj-a", today_only=False)
+        assert removed == 0
+
+    def test_preserves_malformed_lines(self):
+        now = self._now_unix()
+        lines = [
+            "not json at all",
+            make_end_record("s1", "proj-a", "/tmp/proj-a", now, 100),
+            "{broken json",
+            make_end_record("s2", "proj-b", "/tmp/proj-b", now, 200),
+        ]
+        self.sessions_file.write_text("\n".join(lines) + "\n")
+        removed = self.mod.delete_project_sessions(self.sessions_file, "proj-a", today_only=False)
+        assert removed == 1
+        raw_lines = [l for l in self.sessions_file.read_text().strip().split("\n") if l.strip()]
+        assert len(raw_lines) == 3
+        assert raw_lines[0] == "not json at all"
+        assert raw_lines[1] == "{broken json"
