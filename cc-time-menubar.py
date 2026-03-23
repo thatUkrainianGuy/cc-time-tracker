@@ -129,3 +129,67 @@ def build_project_data(
     )
 
     return projects, total
+
+
+# Constants
+TRACKING_DIR = Path.home() / ".claude" / "time-tracking"
+SESSIONS_FILE = TRACKING_DIR / "sessions.jsonl"
+ACTIVE_FILE = TRACKING_DIR / "active.jsonl"
+
+REFRESH_INTERVAL = 30  # seconds
+
+
+def main():
+    """Entry point — imports rumps and runs the menu bar app.
+
+    rumps is imported here (not at module level) so that the pure functions
+    above can be imported and tested without rumps installed.
+    """
+    try:
+        import rumps
+    except ImportError:
+        print("ERROR: rumps is required. Install with: pip install rumps")
+        print("Then run: python3 cc-time-menubar.py")
+        raise SystemExit(1)
+
+    class CCTimeMenuBar(rumps.App):
+        def __init__(self):
+            super().__init__("⏱ 0m", quit_button=None)
+            self.timer = rumps.Timer(self.refresh, REFRESH_INTERVAL)
+            self.timer.start()
+            self.refresh(None)  # initial load
+
+        def refresh(self, _):
+            """Reload data from JSONL files and update the menu bar."""
+            completed = load_today_sessions(SESSIONS_FILE)
+            active = load_active_sessions(ACTIVE_FILE)
+            projects, total = build_project_data(completed, active)
+
+            # Update title
+            self.title = f"⏱ {format_duration(total)}"
+
+            # Rebuild menu
+            self.menu.clear()
+
+            for name, secs, _has_completed, is_active in projects:
+                prefix = "● " if is_active else "  "
+                label = f"{prefix}{name}    {format_duration(secs)}"
+                item = rumps.MenuItem(label, callback=None)
+                self.menu.add(item)
+
+            if projects:
+                self.menu.add(rumps.separator)
+
+            total_item = rumps.MenuItem(f"  Today: {format_duration(total)}", callback=None)
+            self.menu.add(total_item)
+            self.menu.add(rumps.separator)
+            self.menu.add(rumps.MenuItem("Quit", callback=self.quit_app))
+
+        def quit_app(self, _):
+            rumps.quit_application()
+
+    CCTimeMenuBar().run()
+
+
+if __name__ == "__main__":
+    main()
