@@ -17,6 +17,7 @@ from pathlib import Path
 TRACKING_DIR = Path.home() / ".claude" / "time-tracking"
 SESSIONS_FILE = TRACKING_DIR / "sessions.jsonl"
 ACTIVE_FILE = TRACKING_DIR / "active.jsonl"
+PROJECTS_META_FILE = TRACKING_DIR / "projects.json"
 REFRESH_INTERVAL = 30  # seconds
 
 
@@ -63,6 +64,38 @@ def _acquire_lock(lock_path):
             yield
 
         return _noop()
+
+
+def load_projects_meta(projects_file: Path, lock_path: Path) -> dict:
+    """Load projects.json metadata. Returns {} if missing or invalid."""
+    with _acquire_lock(lock_path):
+        try:
+            return json.loads(projects_file.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+
+def save_projects_meta(projects_file: Path, meta: dict, lock_path: Path) -> None:
+    """Write projects.json atomically under lock."""
+    with _acquire_lock(lock_path):
+        projects_file.write_text(json.dumps(meta, indent=2) + "\n")
+
+
+def is_archived(meta: dict, project: str) -> bool:
+    """Check if a project is archived. Defaults to False if absent."""
+    return meta.get(project, {}).get("archived", False)
+
+
+def set_archived(meta: dict, project: str, archived: bool) -> None:
+    """Set archived status for a project in the meta dict (in-place)."""
+    if project not in meta:
+        meta[project] = {}
+    meta[project]["archived"] = archived
+
+
+def remove_project_meta(meta: dict, project: str) -> None:
+    """Remove a project's metadata entry (in-place). No-op if absent."""
+    meta.pop(project, None)
 
 
 def delete_project_sessions(

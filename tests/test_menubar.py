@@ -343,3 +343,60 @@ class TestDeleteProjectSessions:
         assert len(raw_lines) == 3
         assert raw_lines[0] == "not json at all"
         assert raw_lines[1] == "{broken json"
+
+
+class TestProjectsMeta:
+    def setup_method(self):
+        self.mod = load_menubar()
+        self.tmpdir = tempfile.mkdtemp()
+        self.projects_file = Path(self.tmpdir) / "projects.json"
+        self.lock_path = Path(self.tmpdir) / ".lock"
+
+    def test_load_missing_file(self):
+        nonexistent = Path(self.tmpdir) / "nope.json"
+        result = self.mod.load_projects_meta(nonexistent, self.lock_path)
+        assert result == {}
+
+    def test_load_existing(self):
+        self.projects_file.write_text('{"proj-a": {"archived": true}}')
+        result = self.mod.load_projects_meta(self.projects_file, self.lock_path)
+        assert result == {"proj-a": {"archived": True}}
+
+    def test_save_and_load_roundtrip(self):
+        data = {"proj-a": {"archived": True}, "proj-b": {"archived": False}}
+        self.mod.save_projects_meta(self.projects_file, data, self.lock_path)
+        result = self.mod.load_projects_meta(self.projects_file, self.lock_path)
+        assert result == data
+
+    def test_is_archived_true(self):
+        meta = {"proj-a": {"archived": True}}
+        assert self.mod.is_archived(meta, "proj-a") is True
+
+    def test_is_archived_false(self):
+        meta = {"proj-a": {"archived": False}}
+        assert self.mod.is_archived(meta, "proj-a") is False
+
+    def test_is_archived_missing_project(self):
+        assert self.mod.is_archived({}, "proj-a") is False
+
+    def test_set_archived(self):
+        meta = {}
+        self.mod.set_archived(meta, "proj-a", True)
+        assert meta == {"proj-a": {"archived": True}}
+
+    def test_set_archived_preserves_other_fields(self):
+        meta = {"proj-a": {"archived": False, "custom": "data"}}
+        self.mod.set_archived(meta, "proj-a", True)
+        assert meta["proj-a"]["archived"] is True
+        assert meta["proj-a"]["custom"] == "data"
+
+    def test_remove_project_meta(self):
+        meta = {"proj-a": {"archived": True}, "proj-b": {"archived": False}}
+        self.mod.remove_project_meta(meta, "proj-a")
+        assert "proj-a" not in meta
+        assert "proj-b" in meta
+
+    def test_remove_project_meta_missing_key(self):
+        meta = {"proj-a": {"archived": True}}
+        self.mod.remove_project_meta(meta, "nonexistent")
+        assert meta == {"proj-a": {"archived": True}}
