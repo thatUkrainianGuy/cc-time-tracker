@@ -125,51 +125,72 @@ def load_today_sessions(sessions_file: Path) -> list[dict]:
     ]
 
 
+def load_all_completed_sessions(sessions_file: Path) -> list[dict]:
+    """Load all completed sessions (end events only) from JSONL file, no date filter."""
+    return [
+        r for r in _read_jsonl(sessions_file)
+        if r.get("event") == "end"
+        and r.get("duration_seconds") is not None
+    ]
+
+
 def load_active_sessions(active_file: Path) -> list[dict]:
     return _read_jsonl(active_file)
 
 
 def build_project_data(
-    completed_sessions: list[dict],
+    today_sessions: list[dict],
+    all_sessions: list[dict],
     active_sessions: list[dict],
-) -> tuple[list[tuple[str, float, bool, bool]], float]:
-    """Aggregate today's data into per-project rows.
+) -> tuple[list[tuple[str, float, float, bool]], float]:
+    """Aggregate per-project rows with today and all-time totals.
 
     Returns:
-        (projects, total_seconds) where projects is a list of
-        (name, total_seconds, has_completed, is_active) sorted by time desc.
+        (projects, today_total) where projects is a list of
+        (name, today_seconds, total_seconds, is_active) sorted by total desc.
     """
     now = datetime.now(timezone.utc).timestamp()
 
-    project_time: dict[str, float] = {}
-    project_has_completed: dict[str, bool] = {}
+    today_time: dict[str, float] = {}
+    total_time: dict[str, float] = {}
     project_is_active: dict[str, bool] = {}
 
-    for s in completed_sessions:
+    for s in today_sessions:
         proj = s.get("project", "unknown")
         dur = s.get("duration_seconds", 0) or 0
-        project_time[proj] = project_time.get(proj, 0) + dur
-        project_has_completed[proj] = True
+        today_time[proj] = today_time.get(proj, 0) + dur
+
+    for s in all_sessions:
+        proj = s.get("project", "unknown")
+        dur = s.get("duration_seconds", 0) or 0
+        total_time[proj] = total_time.get(proj, 0) + dur
 
     for s in active_sessions:
         proj = s.get("project", "unknown")
         start_ts = s.get("timestamp_unix", now)
         elapsed = max(0, now - start_ts)
-        project_time[proj] = project_time.get(proj, 0) + elapsed
+        today_time[proj] = today_time.get(proj, 0) + elapsed
+        total_time[proj] = total_time.get(proj, 0) + elapsed
         project_is_active[proj] = True
 
-    total = sum(project_time.values())
+    all_projects = set(today_time) | set(total_time)
+    today_total = sum(today_time.values())
 
     projects = sorted(
         [
-            (name, secs, project_has_completed.get(name, False), project_is_active.get(name, False))
-            for name, secs in project_time.items()
+            (
+                name,
+                today_time.get(name, 0),
+                total_time.get(name, 0),
+                project_is_active.get(name, False),
+            )
+            for name in all_projects
         ],
-        key=lambda x: x[1],
+        key=lambda x: x[2],  # sort by total_seconds
         reverse=True,
     )
 
-    return projects, total
+    return projects, today_total
 
 
 def main():

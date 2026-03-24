@@ -108,6 +108,49 @@ class TestLoadTodaySessions:
         assert len(result) == 1
 
 
+class TestLoadAllCompletedSessions:
+    def setup_method(self):
+        self.mod = load_menubar()
+        self.tmpdir = tempfile.mkdtemp()
+        self.sessions_file = Path(self.tmpdir) / "sessions.jsonl"
+
+    def _now_unix(self):
+        return datetime.now(timezone.utc).timestamp()
+
+    def test_returns_all_end_events(self):
+        now = self._now_unix()
+        old = now - 86400 * 30  # 30 days ago
+        lines = [
+            make_start_record("s1", "proj", "/tmp/proj", old),
+            make_end_record("s1", "proj", "/tmp/proj", old + 3600, 3600),
+            make_start_record("s2", "proj", "/tmp/proj", now - 3600),
+            make_end_record("s2", "proj", "/tmp/proj", now, 1800),
+        ]
+        self.sessions_file.write_text("\n".join(lines) + "\n")
+        result = self.mod.load_all_completed_sessions(self.sessions_file)
+        assert len(result) == 2
+        assert all(r["event"] == "end" for r in result)
+
+    def test_excludes_start_events(self):
+        now = self._now_unix()
+        lines = [
+            make_start_record("s1", "proj", "/tmp/proj", now - 3600),
+            make_end_record("s1", "proj", "/tmp/proj", now, 3600),
+        ]
+        self.sessions_file.write_text("\n".join(lines) + "\n")
+        result = self.mod.load_all_completed_sessions(self.sessions_file)
+        assert len(result) == 1
+        assert result[0]["event"] == "end"
+
+    def test_empty_file(self):
+        self.sessions_file.write_text("")
+        assert self.mod.load_all_completed_sessions(self.sessions_file) == []
+
+    def test_no_file(self):
+        nonexistent = Path(self.tmpdir) / "nope.jsonl"
+        assert self.mod.load_all_completed_sessions(nonexistent) == []
+
+
 class TestLoadActiveSessions:
     def setup_method(self):
         self.mod = load_menubar()
@@ -145,63 +188,93 @@ class TestBuildProjectData:
         return datetime.now(timezone.utc).timestamp()
 
     def test_empty_inputs(self):
-        projects, total = self.mod.build_project_data([], [])
+        projects, today_total = self.mod.build_project_data([], [], [])
         assert projects == []
-        assert total == 0
+        assert today_total == 0
 
-    def test_completed_sessions_only(self):
-        sessions = [
-            {"project": "proj-a", "duration_seconds": 3600},
+    def test_today_and_all_time(self):
+        today = [
             {"project": "proj-a", "duration_seconds": 1800},
-            {"project": "proj-b", "duration_seconds": 600},
         ]
-        projects, total = self.mod.build_project_data(sessions, [])
-        assert total == 6000
-        # Sorted descending by time
-        assert projects[0] == ("proj-a", 5400, True, False)
-        assert projects[1] == ("proj-b", 600, True, False)
+        all_time = [
+            {"project": "proj-a", "duration_seconds": 1800},
+            {"project": "proj-a", "duration_seconds": 3600},
+        ]
+        projects, today_total = self.mod.build_project_data(today, all_time, [])
+        assert len(projects) == 1
+        name, today_secs, total_secs, is_active = projects[0]
+        assert name == "proj-a"
+        assert today_secs == 1800
+        assert total_secs == 5400
+        assert is_active is False
+        assert today_total == 1800
+
+    def test_all_time_only_no_today(self):
+        """Project with past sessions but none today still appears."""
+        all_time = [
+            {"project": "proj-a", "duration_seconds": 7200},
+        ]
+        projects, today_total = self.mod.build_project_data([], all_time, [])
+        assert len(projects) == 1
+        name, today_secs, total_secs, is_active = projects[0]
+        assert name == "proj-a"
+        assert today_secs == 0
+        assert total_secs == 7200
+        assert today_total == 0
 
     def test_active_sessions_add_elapsed(self):
         now = self._now_unix()
-        sessions = []
         active = [
             {"project": "proj-a", "timestamp_unix": now - 600},
         ]
-        projects, total = self.mod.build_project_data(sessions, active)
+        projects, today_total = self.mod.build_project_data([], [], active)
         assert len(projects) == 1
-        name, secs, has_completed, is_active = projects[0]
+        name, today_secs, total_secs, is_active = projects[0]
         assert name == "proj-a"
         assert is_active is True
-        assert 595 <= secs <= 610
-
-    def test_multiple_active_sessions_same_project(self):
-        now = self._now_unix()
-        sessions = []
-        active = [
-            {"project": "proj-a", "timestamp_unix": now - 600},
-            {"project": "proj-a", "timestamp_unix": now - 300},
-        ]
-        projects, total = self.mod.build_project_data(sessions, active)
-        assert len(projects) == 1
-        name, secs, _, is_active = projects[0]
-        assert name == "proj-a"
-        assert is_active is True
-        assert 895 <= secs <= 910
+        assert 595 <= today_secs <= 610
+        assert 595 <= total_secs <= 610
 
     def test_combined_completed_and_active(self):
         now = self._now_unix()
-        sessions = [
+        today = [{"project": "proj-a", "duration_seconds": 3600}]
+        all_time = [
             {"project": "proj-a", "duration_seconds": 3600},
+            {"project": "proj-a", "duration_seconds": 7200},
         ]
-        active = [
-            {"project": "proj-a", "timestamp_unix": now - 600},
-        ]
-        projects, total = self.mod.build_project_data(sessions, active)
+        active = [{"project": "proj-a", "timestamp_unix": now - 600}]
+        projects, today_total = self.mod.build_project_data(today, all_time, active)
         assert len(projects) == 1
-        name, secs, _, is_active = projects[0]
-        assert name == "proj-a"
+        name, today_secs, total_secs, is_active = projects[0]
         assert is_active is True
-        assert 4195 <= secs <= 4210
+        # today: 3600 completed + ~600 active
+        assert 4195 <= today_secs <= 4210
+        # all-time: 3600 + 7200 completed + ~600 active
+        assert 11395 <= total_secs <= 11410
+
+    def test_sorted_by_total_descending(self):
+        all_time = [
+            {"project": "small", "duration_seconds": 100},
+            {"project": "big", "duration_seconds": 9000},
+        ]
+        projects, _ = self.mod.build_project_data([], all_time, [])
+        assert projects[0][0] == "big"
+        assert projects[1][0] == "small"
+
+    def test_multiple_projects(self):
+        today = [
+            {"project": "proj-a", "duration_seconds": 1800},
+            {"project": "proj-b", "duration_seconds": 600},
+        ]
+        all_time = [
+            {"project": "proj-a", "duration_seconds": 1800},
+            {"project": "proj-a", "duration_seconds": 3600},
+            {"project": "proj-b", "duration_seconds": 600},
+            {"project": "proj-b", "duration_seconds": 1200},
+        ]
+        projects, today_total = self.mod.build_project_data(today, all_time, [])
+        assert len(projects) == 2
+        assert today_total == 2400
 
 
 class TestDeleteProjectSessions:
