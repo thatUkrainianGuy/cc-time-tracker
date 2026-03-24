@@ -15,12 +15,13 @@ Three Python scripts, an installer, and a hooks config:
 - **`cc-time-report.py`** — CLI report tool (installed as `cc-time-report`). Reads `sessions.jsonl` and `active.jsonl`, supports subcommands: `today`, `week`, `month`, `all`, `project <name>`, `active`, `csv`, `orphans`, `raw`.
 - **`install.sh`** — Copies hooks to `~/.claude/hooks/`, installs report CLI to `~/.local/bin/`, merges hook config into `~/.claude/settings.json`.
 - **`hooks-config.json`** — Hook definitions for SessionStart/SessionEnd with 5s timeout.
-- **`cc-time-menubar.py`** — macOS menu bar app (requires `pip install rumps`). Shows today's total time in the menu bar with emoji indicators (🟢 active, ⚪ inactive), per-project breakdown, and delete submenus for inactive projects. Reads JSONL files directly every 30s. **Intentionally standalone** — duplicates utilities like `_read_jsonl` and `_acquire_lock` rather than importing from `src/` to avoid package dependencies.
+- **`cc-time-menubar.py`** — macOS menu bar app (requires `pip install rumps`). Shows cumulative project time (today/total) in the menu bar with emoji indicators (🟢 active, ⚪ inactive), per-project breakdown with archive/unarchive, and CSV/Markdown export via NSSavePanel. Reads JSONL files directly every 30s. **Intentionally standalone** — duplicates utilities like `_read_jsonl` and `_acquire_lock` rather than importing from `src/` to avoid package dependencies.
 
 ## Key Data Paths (at runtime)
 
 - `~/.claude/time-tracking/sessions.jsonl` — append-only log of all start/end events
 - `~/.claude/time-tracking/active.jsonl` — currently running sessions (start records only, removed on end)
+- `~/.claude/time-tracking/projects.json` — per-project metadata (archived status)
 - `~/.claude/time-tracking/.lock` — filelock file for concurrent session safety
 
 ## Concurrency Model
