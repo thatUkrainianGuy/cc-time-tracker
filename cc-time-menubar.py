@@ -305,38 +305,109 @@ def main():
             self.refresh(None)
 
         def refresh(self, _):
-            completed = load_today_sessions(SESSIONS_FILE)
+            today_completed = load_today_sessions(SESSIONS_FILE)
+            all_completed = load_all_completed_sessions(SESSIONS_FILE)
             active = load_active_sessions(ACTIVE_FILE)
-            projects, total = build_project_data(completed, active)
+            lock_path = TRACKING_DIR / ".lock"
+            meta = load_projects_meta(PROJECTS_META_FILE, lock_path)
+
+            # Auto-unarchive active projects
+            meta_changed = False
+            for s in active:
+                proj = s.get("project", "unknown")
+                if is_archived(meta, proj):
+                    set_archived(meta, proj, False)
+                    meta_changed = True
+            if meta_changed:
+                save_projects_meta(PROJECTS_META_FILE, meta, lock_path)
+
+            projects, today_total = build_project_data(today_completed, all_completed, active)
 
             icon = "⏱" if active else "⏸"
-            self.title = f"{icon} {format_duration(total)}"
+            self.title = f"{icon} {format_duration(today_total)}"
             self.menu.clear()
 
-            for name, secs, _has_completed, is_active in projects:
+            archived_projects = []
+
+            for name, today_secs, total_secs, is_active in projects:
+                if is_archived(meta, name) and not is_active:
+                    archived_projects.append((name, today_secs, total_secs, is_active))
+                    continue
+
                 prefix = "🟢 " if is_active else "⚪ "
-                label = f"{prefix}{name}\t{format_duration(secs)}"
+                today_str = format_duration(today_secs)
+                total_str = format_duration(total_secs)
+                label = f"{prefix}{name}\t{today_str} today / {total_str} total"
+
                 if is_active:
                     item = rumps.MenuItem(label, callback=lambda _: None)
+                    item.add(rumps.MenuItem(
+                        "Export as CSV",
+                        callback=lambda _, p=name: self._export_report(p, "csv"),
+                    ))
+                    item.add(rumps.MenuItem(
+                        "Export as Markdown",
+                        callback=lambda _, p=name: self._export_report(p, "md"),
+                    ))
                 else:
                     item = rumps.MenuItem(label)
-                    delete_today = rumps.MenuItem(
+                    item.add(rumps.MenuItem(
+                        "Export as CSV",
+                        callback=lambda _, p=name: self._export_report(p, "csv"),
+                    ))
+                    item.add(rumps.MenuItem(
+                        "Export as Markdown",
+                        callback=lambda _, p=name: self._export_report(p, "md"),
+                    ))
+                    item.add(rumps.MenuItem(
+                        "Archive",
+                        callback=lambda _, p=name: self._archive_project(p),
+                    ))
+                    item.add(rumps.MenuItem(
                         "Delete today's sessions",
                         callback=lambda _, p=name: self._delete_sessions(p, today_only=True),
-                    )
-                    delete_all = rumps.MenuItem(
+                    ))
+                    item.add(rumps.MenuItem(
                         "Delete project",
                         callback=lambda _, p=name: self._delete_project(p),
-                    )
-                    item.add(delete_today)
-                    item.add(delete_all)
+                    ))
                 self.menu.add(item)
 
             if projects:
                 self.menu.add(rumps.separator)
 
-            total_item = rumps.MenuItem(f"Today: {format_duration(total)}", callback=None)
+            total_item = rumps.MenuItem(
+                f"Today: {format_duration(today_total)}", callback=None
+            )
             self.menu.add(total_item)
+
+            # Archived submenu
+            if archived_projects:
+                self.menu.add(rumps.separator)
+                archived_menu = rumps.MenuItem(f"Show archived ({len(archived_projects)})")
+                for name, today_secs, total_secs, _ in archived_projects:
+                    total_str = format_duration(total_secs)
+                    alabel = f"⚪ {name}\t{total_str} total"
+                    aitem = rumps.MenuItem(alabel)
+                    aitem.add(rumps.MenuItem(
+                        "Export as CSV",
+                        callback=lambda _, p=name: self._export_report(p, "csv"),
+                    ))
+                    aitem.add(rumps.MenuItem(
+                        "Export as Markdown",
+                        callback=lambda _, p=name: self._export_report(p, "md"),
+                    ))
+                    aitem.add(rumps.MenuItem(
+                        "Unarchive",
+                        callback=lambda _, p=name: self._unarchive_project(p),
+                    ))
+                    aitem.add(rumps.MenuItem(
+                        "Delete project",
+                        callback=lambda _, p=name: self._delete_project(p),
+                    ))
+                    archived_menu.add(aitem)
+                self.menu.add(archived_menu)
+
             self.menu.add(rumps.separator)
             self.menu.add(rumps.MenuItem("Quit", callback=self.quit_app))
 
@@ -376,7 +447,49 @@ def main():
             if response == 1:
                 delete_project_sessions(SESSIONS_FILE, project, today_only=False)
                 delete_project_sessions(ACTIVE_FILE, project, today_only=False)
+                lock_path = TRACKING_DIR / ".lock"
+                meta = load_projects_meta(PROJECTS_META_FILE, lock_path)
+                remove_project_meta(meta, project)
+                save_projects_meta(PROJECTS_META_FILE, meta, lock_path)
                 self._schedule_refresh()
+
+        def _archive_project(self, project):
+            lock_path = TRACKING_DIR / ".lock"
+            meta = load_projects_meta(PROJECTS_META_FILE, lock_path)
+            set_archived(meta, project, True)
+            save_projects_meta(PROJECTS_META_FILE, meta, lock_path)
+            self._schedule_refresh()
+
+        def _unarchive_project(self, project):
+            lock_path = TRACKING_DIR / ".lock"
+            meta = load_projects_meta(PROJECTS_META_FILE, lock_path)
+            set_archived(meta, project, False)
+            save_projects_meta(PROJECTS_META_FILE, meta, lock_path)
+            self._schedule_refresh()
+
+        def _export_report(self, project, fmt):
+            self._bring_to_front()
+            from AppKit import NSSavePanel
+
+            all_sessions = load_all_completed_sessions(SESSIONS_FILE)
+
+            if fmt == "csv":
+                content = generate_csv_report(project, all_sessions)
+                ext = "csv"
+            else:
+                content = generate_md_report(project, all_sessions)
+                ext = "md"
+
+            today = datetime.now().strftime("%Y-%m-%d")
+            filename = f"{project}_report_{today}.{ext}"
+
+            panel = NSSavePanel.savePanel()
+            panel.setNameFieldStringValue_(filename)
+            panel.setAllowedFileTypes_([ext])
+
+            if panel.runModal() == 1:  # NSModalResponseOK
+                path = panel.URL().path()
+                Path(path).write_text(content, encoding="utf-8")
 
         def quit_app(self, _):
             rumps.quit_application()
