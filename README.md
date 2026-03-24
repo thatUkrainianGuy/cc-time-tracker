@@ -2,6 +2,8 @@
 
 Automatically tracks time spent in [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions per project, using the native hooks system.
 
+<img src="preview.png" alt="Menu bar app showing per-project time tracking" width="400">
+
 ## Quick Start
 
 ```bash
