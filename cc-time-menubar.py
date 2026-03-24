@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 macOS menu bar app for Claude Code time tracking.
-Shows today's total session time in the menu bar.
-Click to see per-project breakdown with active session indicators.
+Shows cumulative project time in the menu bar with today/total breakdown.
+Click to see per-project breakdown, archive projects, or export reports.
 
 Usage:
     python3 cc-time-menubar.py
