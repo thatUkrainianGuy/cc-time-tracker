@@ -1,6 +1,6 @@
 # Claude Code Time Tracker
 
-Automatically tracks time spent in Claude Code sessions per project, using the native hooks system.
+Automatically tracks time spent in [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions per project, using the native hooks system.
 
 ## Quick Start
 
@@ -35,34 +35,34 @@ Last 7 days  •  47 total sessions recorded
 
 Active Sessions
 
-  ● streetkast  1h 23m elapsed  (abc123def45…)
-    /home/igor/projects/streetkast
+  ● my-app  1h 23m elapsed  (abc123def45…)
+    ~/projects/my-app
 
 Last 7 Days
 
-  Project               Time      Hours  Sessions
-  ────────────────  ──────────  ────────  ────────
-  streetkast          8h 42m      8.70h        12
-  crewshift           3h 15m      3.25h         8
-  social-media-saas   2h 30m      2.50h         6
-  bs-films            1h 05m      1.08h         4
-  ────────────────  ──────────  ────────  ────────
-  TOTAL              15h 32m     15.53h        30
+  Project          Time      Hours  Sessions
+  ─────────────  ──────────  ─────  ────────
+  my-app           8h 42m    8.70h       12
+  api-server       3h 15m    3.25h        8
+  landing-page     2h 30m    2.50h        6
+  cli-tool         1h 05m    1.08h        4
+  ─────────────  ──────────  ─────  ────────
+  TOTAL           15h 32m   15.53h       30
 ```
 
 ## How It Works
 
 ```
-You launch CC in ~/projects/streetkast/
+You launch Claude Code in ~/projects/my-app/
   → SessionStart hook fires
-  → Records: {session_id, project: "streetkast", start_time}
+  → Records: {session_id, project: "my-app", start_time}
 
 You work for 45 minutes, then /exit
   → SessionEnd hook fires
   → Calculates: 45m 12s
   → Writes completed session to ~/.claude/time-tracking/sessions.jsonl
 
-Meanwhile, another CC instance is running in ~/projects/crewshift/
+Meanwhile, another instance is running in ~/projects/api-server/
   → Tracked independently (different session_id)
   → Both durations are summed per-project in reports
 ```
@@ -73,27 +73,14 @@ Meanwhile, another CC instance is running in ~/projects/crewshift/
 
 Sessions are stored in `~/.claude/time-tracking/sessions.jsonl` (append-only JSONL).
 
-## Alternative Install (curl)
-
-If you prefer not to use pip, the bash installer still works:
-
-```bash
-git clone https://github.com/riabchuk/cc-time-tracker.git ~/cc-time-tracker
-cd ~/cc-time-tracker
-chmod +x install.sh
-./install.sh
-```
-
-> **Note:** Don't mix both methods. Use `cc-time-setup` for pip installs and `install.sh` for standalone installs.
-
 ## Multiple Instances
 
 Each Claude Code session gets a unique `session_id`. If you run 3 instances:
-- Terminal 1: `cd ~/streetkast && claude` → session A starts
-- Terminal 2: `cd ~/crewshift && claude` → session B starts
-- Terminal 3: `cd ~/streetkast && claude` → session C starts
+- Terminal 1: `cd ~/my-app && claude` → session A starts
+- Terminal 2: `cd ~/api-server && claude` → session B starts
+- Terminal 3: `cd ~/my-app && claude` → session C starts
 
-All three track independently. The report sums A+C under "streetkast" and B under "crewshift".
+All three track independently. The report sums A+C under "my-app" and B under "api-server".
 
 ## Edge Cases
 

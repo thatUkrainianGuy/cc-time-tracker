@@ -9,7 +9,7 @@ description = "Automatic time tracking for Claude Code sessions"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
-authors = [{ name = "Igor Riabchuk" }]
+authors = [{ name = "thatUkrainianGuy" }]
 keywords = ["claude-code", "time-tracking", "productivity"]
 classifiers = [
     "Development Status :: 4 - Beta",

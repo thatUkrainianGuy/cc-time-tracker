@@ -38,8 +38,8 @@ Both hooks use optional `filelock` (pip package). Without it, a no-op context ma
 
 ## Environment
 
-- System python3 is 3.14 (Homebrew). `pip3` points to 3.9 — always use `python3 -m pip`.
-- `--break-system-packages` required for pip installs (PEP 668).
+- Requires Python 3.10+. Use `python3 -m pip` for installs.
+- On systems with PEP 668, `--break-system-packages` may be required for pip installs.
 
 ## Important Constraints
 
