@@ -400,3 +400,48 @@ class TestProjectsMeta:
         meta = {"proj-a": {"archived": True}}
         self.mod.remove_project_meta(meta, "nonexistent")
         assert meta == {"proj-a": {"archived": True}}
+
+
+class TestGenerateReport:
+    def setup_method(self):
+        self.mod = load_menubar()
+
+    def _make_sessions(self):
+        """Create test sessions spanning multiple days."""
+        return [
+            {"project": "proj-a", "event": "end", "duration_seconds": 3600,
+             "timestamp_unix": 1742515200.0,  # 2025-03-21 00:00:00 UTC
+             "session_id": "s1", "reason": "user_exit"},
+            {"project": "proj-a", "event": "end", "duration_seconds": 1800,
+             "timestamp_unix": 1742515200.0 + 7200,  # same day
+             "session_id": "s2", "reason": "user_exit"},
+            {"project": "proj-a", "event": "end", "duration_seconds": 5400,
+             "timestamp_unix": 1742601600.0,  # 2025-03-22 00:00:00 UTC
+             "session_id": "s3", "reason": "user_exit"},
+        ]
+
+    def test_generate_csv_report(self):
+        sessions = self._make_sessions()
+        csv = self.mod.generate_csv_report("proj-a", sessions)
+        lines = csv.strip().split("\n")
+        assert lines[0] == "Date,Project,Sessions,Duration,Hours"
+        assert len(lines) == 4  # header + 2 days + total
+        assert lines[-1].startswith("Total,")
+
+    def test_generate_md_report(self):
+        sessions = self._make_sessions()
+        md = self.mod.generate_md_report("proj-a", sessions)
+        assert "# proj-a" in md
+        assert "| Date |" in md
+        assert "**Total**" in md
+
+    def test_generate_csv_empty(self):
+        csv = self.mod.generate_csv_report("proj-a", [])
+        lines = csv.strip().split("\n")
+        assert lines[0] == "Date,Project,Sessions,Duration,Hours"
+        assert lines[1].startswith("Total,")
+
+    def test_generate_md_empty(self):
+        md = self.mod.generate_md_report("proj-a", [])
+        assert "**Total**" in md
+        assert "0.00" in md

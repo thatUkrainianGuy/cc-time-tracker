@@ -98,6 +98,64 @@ def remove_project_meta(meta: dict, project: str) -> None:
     meta.pop(project, None)
 
 
+def _aggregate_sessions_by_date(project: str, sessions: list[dict]) -> list[tuple[str, int, float]]:
+    """Aggregate sessions for a project by date (local time).
+
+    Returns sorted list of (date_str, session_count, total_seconds).
+    """
+    days: dict[str, list[float]] = {}
+    for s in sessions:
+        if s.get("project") != project:
+            continue
+        ts = s.get("timestamp_unix", 0)
+        if not ts:
+            continue
+        day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+        days.setdefault(day, []).append(s.get("duration_seconds", 0) or 0)
+
+    return sorted(
+        [(day, len(durations), sum(durations)) for day, durations in days.items()]
+    )
+
+
+def generate_csv_report(project: str, sessions: list[dict]) -> str:
+    """Generate a CSV report for a project."""
+    rows = _aggregate_sessions_by_date(project, sessions)
+    lines = ["Date,Project,Sessions,Duration,Hours"]
+    total_sessions = 0
+    total_seconds = 0.0
+    for day, count, secs in rows:
+        total_sessions += count
+        total_seconds += secs
+        lines.append(f"{day},{project},{count},{format_duration(secs)},{secs / 3600:.2f}")
+    lines.append(f"Total,,{total_sessions},{format_duration(total_seconds)},{total_seconds / 3600:.2f}")
+    return "\n".join(lines) + "\n"
+
+
+def generate_md_report(project: str, sessions: list[dict]) -> str:
+    """Generate a Markdown report for a project."""
+    rows = _aggregate_sessions_by_date(project, sessions)
+    today = datetime.now().strftime("%Y-%m-%d")
+    lines = [
+        f"# {project} — Time Report",
+        "",
+        f"Generated: {today}",
+        "",
+        "| Date | Sessions | Duration | Hours |",
+        "|------|----------|----------|-------|",
+    ]
+    total_sessions = 0
+    total_seconds = 0.0
+    for day, count, secs in rows:
+        total_sessions += count
+        total_seconds += secs
+        lines.append(f"| {day} | {count} | {format_duration(secs)} | {secs / 3600:.2f} |")
+    lines.append(
+        f"| **Total** | **{total_sessions}** | **{format_duration(total_seconds)}** | **{total_seconds / 3600:.2f}** |"
+    )
+    return "\n".join(lines) + "\n"
+
+
 def delete_project_sessions(
     sessions_file: Path,
     project: str,
