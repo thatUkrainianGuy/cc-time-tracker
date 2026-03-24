@@ -1,6 +1,13 @@
-.worktrees/
-dist/
-*.egg-info/
+# macOS
+.DS_Store
+
+# Python
 __pycache__/
+*.egg-info/
 .eggs/
 build/
+dist/
+
+# Claude Code / Superpowers
+.worktrees/
+docs/
