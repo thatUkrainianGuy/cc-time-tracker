@@ -282,6 +282,7 @@ class TestDeleteProjectSessions:
         self.mod = load_menubar()
         self.tmpdir = tempfile.mkdtemp()
         self.sessions_file = Path(self.tmpdir) / "sessions.jsonl"
+        self.lock_path = Path(self.tmpdir) / ".lock"
 
     def _now_unix(self):
         return datetime.now(timezone.utc).timestamp()
@@ -297,7 +298,7 @@ class TestDeleteProjectSessions:
             make_end_record("s3", "proj-a", "/tmp/proj-a", yesterday, 100),
         ]
         self.sessions_file.write_text("\n".join(lines) + "\n")
-        removed = self.mod.delete_project_sessions(self.sessions_file, "proj-a", today_only=False)
+        removed = self.mod.delete_project_sessions(self.sessions_file, "proj-a", today_only=False, lock_path=self.lock_path)
         assert removed == 3
         remaining = self.mod._read_jsonl(self.sessions_file)
         assert len(remaining) == 2
@@ -312,7 +313,7 @@ class TestDeleteProjectSessions:
             make_end_record("s3", "proj-a", "/tmp/proj-a", yesterday, 100),
         ]
         self.sessions_file.write_text("\n".join(lines) + "\n")
-        removed = self.mod.delete_project_sessions(self.sessions_file, "proj-a", today_only=True)
+        removed = self.mod.delete_project_sessions(self.sessions_file, "proj-a", today_only=True, lock_path=self.lock_path)
         assert removed == 2
         remaining = self.mod._read_jsonl(self.sessions_file)
         assert len(remaining) == 1
@@ -320,12 +321,12 @@ class TestDeleteProjectSessions:
 
     def test_delete_missing_file(self):
         nonexistent = Path(self.tmpdir) / "nope.jsonl"
-        removed = self.mod.delete_project_sessions(nonexistent, "proj-a", today_only=False)
+        removed = self.mod.delete_project_sessions(nonexistent, "proj-a", today_only=False, lock_path=self.lock_path)
         assert removed == 0
 
     def test_delete_empty_file(self):
         self.sessions_file.write_text("")
-        removed = self.mod.delete_project_sessions(self.sessions_file, "proj-a", today_only=False)
+        removed = self.mod.delete_project_sessions(self.sessions_file, "proj-a", today_only=False, lock_path=self.lock_path)
         assert removed == 0
 
     def test_preserves_malformed_lines(self):
@@ -337,7 +338,7 @@ class TestDeleteProjectSessions:
             make_end_record("s2", "proj-b", "/tmp/proj-b", now, 200),
         ]
         self.sessions_file.write_text("\n".join(lines) + "\n")
-        removed = self.mod.delete_project_sessions(self.sessions_file, "proj-a", today_only=False)
+        removed = self.mod.delete_project_sessions(self.sessions_file, "proj-a", today_only=False, lock_path=self.lock_path)
         assert removed == 1
         raw_lines = [l for l in self.sessions_file.read_text().strip().split("\n") if l.strip()]
         assert len(raw_lines) == 3

@@ -7,15 +7,12 @@ from datetime import datetime, timezone
 
 from cc_time_tracker.common import (
     SESSIONS_FILE, ACTIVE_FILE,
-    ensure_dir, acquire_lock, extract_project_name,
+    ensure_dir, acquire_lock, extract_project_name, read_hook_input,
 )
 
 
 def main():
-    try:
-        input_data = json.load(sys.stdin)
-    except (json.JSONDecodeError, EOFError):
-        sys.exit(1)
+    input_data = read_hook_input()
 
     session_id = input_data.get("session_id", "unknown")
     cwd = input_data.get("cwd", os.getcwd())

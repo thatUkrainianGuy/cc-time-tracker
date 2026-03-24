@@ -13,8 +13,8 @@ from cc_time_tracker.common import (
 )
 
 
-def load_sessions() -> list[dict]:
-    return load_jsonl(SESSIONS_FILE)
+def load_sessions(after_ts: float | None = None) -> list[dict]:
+    return load_jsonl(SESSIONS_FILE, after_ts=after_ts)
 
 def load_active() -> list[dict]:
     return load_jsonl(ACTIVE_FILE)
@@ -163,10 +163,11 @@ def print_daily_breakdown(days: dict[str, dict[str, float]]):
             print(f"    {proj:<20} {format_duration(dur):>10}  {DIM}{bar}{RESET}")
 
 
-def print_active_sessions():
+def print_active_sessions(active: list[dict] | None = None):
     print_header("Active Sessions")
 
-    active = load_active()
+    if active is None:
+        active = load_active()
     if not active:
         print(f"  {DIM}No active sessions.{RESET}")
         return
@@ -186,7 +187,7 @@ def print_active_sessions():
         print(f"    {DIM}{s.get('cwd', '')}{RESET}")
 
 
-def print_orphans(records: list[dict]):
+def print_orphans(records: list[dict], active: list[dict] | None = None):
     """Find start events with no matching end event."""
     print_header("Orphaned Sessions (no end recorded)")
 
@@ -198,8 +199,8 @@ def print_orphans(records: list[dict]):
         elif r.get("event") == "end" and sid in starts:
             del starts[sid]
 
-    # Also remove currently active sessions
-    active = load_active()
+    if active is None:
+        active = load_active()
     active_ids = {a.get("session_id") for a in active}
     orphans = {sid: r for sid, r in starts.items() if sid not in active_ids}
 
@@ -246,25 +247,34 @@ def main():
         print()
         return
 
-    records = load_sessions()
+    # Time-bounded commands load only records after the cutoff
+    cutoff = None
+    if command == "today":
+        cutoff = get_start_of_today()
+    elif command == "week":
+        cutoff = get_start_of_week()
+    elif command == "month":
+        cutoff = get_start_of_month()
+    elif command == "summary":
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=7))
+
+    cutoff_ts = cutoff.timestamp() if cutoff else None
+    records = load_sessions(after_ts=cutoff_ts)
     completed = get_completed_sessions(records)
 
     if command == "today":
-        filtered = filter_by_time(completed, get_start_of_today())
-        projects = aggregate_by_project(filtered)
+        projects = aggregate_by_project(completed)
         print_project_table(projects, "Today")
 
     elif command == "week":
-        filtered = filter_by_time(completed, get_start_of_week())
-        projects = aggregate_by_project(filtered)
-        days = aggregate_by_day(filtered)
+        projects = aggregate_by_project(completed)
+        days = aggregate_by_day(completed)
         print_project_table(projects, "This Week")
         print_daily_breakdown(days)
 
     elif command == "month":
-        filtered = filter_by_time(completed, get_start_of_month())
-        projects = aggregate_by_project(filtered)
-        days = aggregate_by_day(filtered)
+        projects = aggregate_by_project(completed)
+        days = aggregate_by_day(completed)
         print_project_table(projects, "This Month")
         print_daily_breakdown(days)
 
@@ -294,16 +304,14 @@ def main():
             print(json.dumps(r))
 
     elif command == "summary":
-        # Last 7 days summary
-        week_ago = datetime.now(timezone.utc) - timedelta(days=7)
-        filtered = filter_by_time(completed, week_ago)
-        projects = aggregate_by_project(filtered)
-        days = aggregate_by_day(filtered)
+        active = load_active()
+        projects = aggregate_by_project(completed)
+        days = aggregate_by_day(completed)
 
         print(f"\n{BOLD}Claude Code Time Tracker{RESET}")
-        print(f"{DIM}Last 7 days  •  {len(completed)} total sessions recorded{RESET}")
+        print(f"{DIM}Last 7 days  •  {len(completed)} sessions{RESET}")
 
-        print_active_sessions()
+        print_active_sessions(active)
         print_project_table(projects, "Last 7 Days")
         print_daily_breakdown(days)
 

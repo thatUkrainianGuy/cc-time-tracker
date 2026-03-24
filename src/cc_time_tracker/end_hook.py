@@ -7,16 +7,16 @@ from datetime import datetime, timezone
 
 from cc_time_tracker.common import (
     SESSIONS_FILE, ACTIVE_FILE,
-    acquire_lock, extract_project_name,
+    acquire_lock, extract_project_name, read_hook_input,
 )
 
 
-def read_and_filter_active(session_id: str) -> tuple[dict | None, list[str]]:
+def read_and_filter_active(active_file, session_id: str) -> tuple[dict | None, list[str]]:
     """Read active.jsonl once, returning the matching start record and remaining lines."""
     match = None
     remaining = []
     try:
-        f = open(ACTIVE_FILE, "r")
+        f = open(active_file, "r")
     except FileNotFoundError:
         return None, []
     with f:
@@ -36,10 +36,7 @@ def read_and_filter_active(session_id: str) -> tuple[dict | None, list[str]]:
 
 
 def main():
-    try:
-        input_data = json.load(sys.stdin)
-    except (json.JSONDecodeError, EOFError):
-        sys.exit(1)
+    input_data = read_hook_input()
 
     session_id = input_data.get("session_id", "unknown")
     cwd = input_data.get("cwd", os.getcwd())
@@ -49,7 +46,7 @@ def main():
     now_ts = now.timestamp()
 
     with acquire_lock():
-        start_record, remaining_lines = read_and_filter_active(session_id)
+        start_record, remaining_lines = read_and_filter_active(ACTIVE_FILE, session_id)
 
         if start_record:
             start_ts = start_record.get("timestamp_unix", 0)

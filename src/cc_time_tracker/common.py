@@ -44,8 +44,28 @@ def extract_project_name(cwd: str) -> str:
     return os.path.basename(os.path.normpath(cwd))
 
 
-def load_jsonl(path: Path) -> list[dict]:
-    """Read a JSONL file, returning a list of parsed dicts. Skips bad lines."""
+def load_settings(path: Path) -> dict:
+    """Read a JSON settings file, returning {} on missing/malformed files."""
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def read_hook_input() -> dict:
+    """Read JSON from stdin for hook scripts. Exits 1 on bad input."""
+    import sys
+    try:
+        return json.load(sys.stdin)
+    except (json.JSONDecodeError, EOFError):
+        sys.exit(1)
+
+
+def load_jsonl(path: Path, after_ts: float | None = None) -> list[dict]:
+    """Read a JSONL file, returning a list of parsed dicts. Skips bad lines.
+
+    If after_ts is given, only records with timestamp_unix >= after_ts are returned.
+    """
     try:
         f = open(path, "r")
     except FileNotFoundError:
@@ -57,7 +77,10 @@ def load_jsonl(path: Path) -> list[dict]:
             if not line:
                 continue
             try:
-                records.append(json.loads(line))
+                record = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if after_ts is not None and record.get("timestamp_unix", 0) < after_ts:
+                continue
+            records.append(record)
     return records

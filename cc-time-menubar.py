@@ -161,19 +161,19 @@ def delete_project_sessions(
     sessions_file: Path,
     project: str,
     today_only: bool,
+    lock_path: Path = LOCK_PATH,
 ) -> int:
     """Remove sessions for a project from the JSONL file.
 
     Returns number of records removed.
     """
-    if not sessions_file.exists():
-        return 0
-
     today_start = get_today_start_unix() if today_only else None
-    lock_path = sessions_file.parent / ".lock"
 
     with _acquire_lock(lock_path):
-        raw = sessions_file.read_text()
+        try:
+            raw = sessions_file.read_text()
+        except FileNotFoundError:
+            return 0
         if not raw.strip():
             return 0
 
@@ -301,18 +301,39 @@ def main():
     class CCTimeMenuBar(rumps.App):
         def __init__(self):
             super().__init__("⏱ 0m", quit_button=None)
+            self._sessions_mtime = 0.0
+            self._active_mtime = 0.0
+            self._cached_all_completed = []
+            self._cached_active = []
             self.timer = rumps.Timer(self.refresh, REFRESH_INTERVAL)
             self.timer.start()
             self.refresh(None)
 
+        def _file_mtime(self, path):
+            try:
+                return path.stat().st_mtime
+            except FileNotFoundError:
+                return 0.0
+
         def refresh(self, _):
-            all_completed = load_all_completed_sessions(SESSIONS_FILE)
+            sessions_mt = self._file_mtime(SESSIONS_FILE)
+            if sessions_mt != self._sessions_mtime:
+                self._sessions_mtime = sessions_mt
+                self._cached_all_completed = load_all_completed_sessions(SESSIONS_FILE)
+
+            active_mt = self._file_mtime(ACTIVE_FILE)
+            if active_mt != self._active_mtime:
+                self._active_mtime = active_mt
+                self._cached_active = load_active_sessions(ACTIVE_FILE)
+
+            all_completed = self._cached_all_completed
+            active = self._cached_active
+
             today_start = get_today_start_unix()
             today_completed = [
                 r for r in all_completed
                 if r.get("timestamp_unix", 0) >= today_start
             ]
-            active = load_active_sessions(ACTIVE_FILE)
             meta = load_projects_meta(PROJECTS_META_FILE, LOCK_PATH)
             self._all_completed = all_completed
 
@@ -412,7 +433,7 @@ def main():
                 cancel="Cancel",
             )
             if response == 1:
-                delete_project_sessions(SESSIONS_FILE, project, today_only=True)
+                delete_project_sessions(SESSIONS_FILE, project, today_only=today_only)
                 self._schedule_refresh()
 
         def _add_export_items(self, menu_item, project_name):

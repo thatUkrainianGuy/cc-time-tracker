@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from cc_time_tracker.common import (
-    TRACKING_DIR, SETTINGS_FILE,
+    TRACKING_DIR, SETTINGS_FILE, load_settings,
     BOLD, GREEN, RED, DIM, RESET,
 )
 
@@ -16,9 +16,8 @@ def remove_hooks(settings_file: Path) -> None:
         print(f"  {DIM}No settings.json found — nothing to remove.{RESET}")
         return
 
-    try:
-        settings = json.loads(settings_file.read_text())
-    except json.JSONDecodeError:
+    settings = load_settings(settings_file)
+    if not settings and settings_file.exists():
         print(f"  {RED}Could not parse {settings_file}{RESET}")
         return
 

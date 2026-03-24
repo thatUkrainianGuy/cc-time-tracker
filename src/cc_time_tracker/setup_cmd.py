@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from cc_time_tracker.common import (
-    TRACKING_DIR, SETTINGS_FILE, ensure_dir,
+    TRACKING_DIR, SETTINGS_FILE, ensure_dir, load_settings,
     BOLD, GREEN, YELLOW, DIM, RESET,
 )
 
@@ -27,24 +27,12 @@ def _has_tracker_hooks(settings: dict) -> bool:
 
 def is_already_installed(settings_file: Path) -> bool:
     """Check if cc-time-tracker hooks are already in settings."""
-    if not settings_file.exists():
-        return False
-    try:
-        settings = json.loads(settings_file.read_text())
-    except (json.JSONDecodeError, OSError):
-        return False
-    return _has_tracker_hooks(settings)
+    return _has_tracker_hooks(load_settings(settings_file))
 
 
 def merge_hooks(settings_file: Path, python_path: str) -> None:
     """Merge time-tracking hooks into settings.json."""
-    if settings_file.exists():
-        try:
-            settings = json.loads(settings_file.read_text())
-        except json.JSONDecodeError:
-            settings = {}
-    else:
-        settings = {}
+    settings = load_settings(settings_file)
 
     if _has_tracker_hooks(settings):
         print(f"  {YELLOW}⚠ Hooks already registered — skipping{RESET}")
