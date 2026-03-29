@@ -346,6 +346,101 @@ class TestDeleteProjectSessions:
         assert raw_lines[1] == "{broken json"
 
 
+class TestMergeProjectSessions:
+    def setup_method(self):
+        self.mod = load_menubar()
+        self.tmpdir = tempfile.mkdtemp()
+        self.sessions_file = Path(self.tmpdir) / "sessions.jsonl"
+        self.lock_path = Path(self.tmpdir) / ".lock"
+
+    def _now_unix(self):
+        return datetime.now(timezone.utc).timestamp()
+
+    def test_merge_rewrites_project_field(self):
+        now = self._now_unix()
+        lines = [
+            make_start_record("s1", "worker-123", "/tmp/worker-123", now - 3600),
+            make_end_record("s1", "worker-123", "/tmp/worker-123", now, 3600),
+            make_start_record("s2", "my-project", "/tmp/my-project", now - 600),
+            make_end_record("s2", "my-project", "/tmp/my-project", now, 600),
+        ]
+        self.sessions_file.write_text("\n".join(lines) + "\n")
+        rewritten = self.mod.merge_project_sessions(
+            self.sessions_file, "worker-123", "my-project", lock_path=self.lock_path,
+        )
+        assert rewritten == 2
+        remaining = self.mod._read_jsonl(self.sessions_file)
+        assert len(remaining) == 4
+        assert all(r["project"] == "my-project" for r in remaining)
+
+    def test_merge_no_matching_source(self):
+        now = self._now_unix()
+        lines = [
+            make_end_record("s1", "my-project", "/tmp/my-project", now, 600),
+        ]
+        self.sessions_file.write_text("\n".join(lines) + "\n")
+        rewritten = self.mod.merge_project_sessions(
+            self.sessions_file, "nonexistent", "my-project", lock_path=self.lock_path,
+        )
+        assert rewritten == 0
+        remaining = self.mod._read_jsonl(self.sessions_file)
+        assert len(remaining) == 1
+        assert remaining[0]["project"] == "my-project"
+
+    def test_merge_missing_file(self):
+        nonexistent = Path(self.tmpdir) / "nope.jsonl"
+        rewritten = self.mod.merge_project_sessions(
+            nonexistent, "src", "dst", lock_path=self.lock_path,
+        )
+        assert rewritten == 0
+
+    def test_merge_empty_file(self):
+        self.sessions_file.write_text("")
+        rewritten = self.mod.merge_project_sessions(
+            self.sessions_file, "src", "dst", lock_path=self.lock_path,
+        )
+        assert rewritten == 0
+
+    def test_merge_preserves_malformed_lines(self):
+        now = self._now_unix()
+        lines = [
+            "not json at all",
+            make_end_record("s1", "worker", "/tmp/worker", now, 100),
+            "{broken json",
+            make_end_record("s2", "proj-b", "/tmp/proj-b", now, 200),
+        ]
+        self.sessions_file.write_text("\n".join(lines) + "\n")
+        rewritten = self.mod.merge_project_sessions(
+            self.sessions_file, "worker", "proj-b", lock_path=self.lock_path,
+        )
+        assert rewritten == 1
+        raw_lines = [l for l in self.sessions_file.read_text().strip().split("\n") if l.strip()]
+        assert len(raw_lines) == 4
+        assert raw_lines[0] == "not json at all"
+        assert raw_lines[2] == "{broken json"
+        # The rewritten record should now have project=proj-b
+        record = json.loads(raw_lines[1])
+        assert record["project"] == "proj-b"
+        assert record["session_id"] == "s1"
+
+    def test_merge_preserves_other_fields(self):
+        now = self._now_unix()
+        lines = [
+            make_end_record("s1", "worker", "/tmp/worker", now, 3600),
+        ]
+        self.sessions_file.write_text("\n".join(lines) + "\n")
+        self.mod.merge_project_sessions(
+            self.sessions_file, "worker", "target", lock_path=self.lock_path,
+        )
+        remaining = self.mod._read_jsonl(self.sessions_file)
+        assert len(remaining) == 1
+        r = remaining[0]
+        assert r["project"] == "target"
+        assert r["session_id"] == "s1"
+        assert r["duration_seconds"] == 3600
+        assert r["cwd"] == "/tmp/worker"
+
+
 class TestProjectsMeta:
     def setup_method(self):
         self.mod = load_menubar()

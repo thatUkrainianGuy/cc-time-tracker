@@ -157,6 +157,49 @@ def generate_md_report(project: str, sessions: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def merge_project_sessions(
+    sessions_file: Path,
+    source_project: str,
+    target_project: str,
+    lock_path: Path = LOCK_PATH,
+) -> int:
+    """Rewrite all sessions for source_project to target_project.
+
+    Returns number of records rewritten.
+    """
+    with _acquire_lock(lock_path):
+        try:
+            raw = sessions_file.read_text()
+        except FileNotFoundError:
+            return 0
+        if not raw.strip():
+            return 0
+
+        new_lines = []
+        rewritten = 0
+
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                new_lines.append(line)
+                continue
+
+            if record.get("project") == source_project:
+                record["project"] = target_project
+                rewritten += 1
+                new_lines.append(json.dumps(record))
+            else:
+                new_lines.append(line)
+
+        sessions_file.write_text("\n".join(new_lines) + "\n" if new_lines else "")
+
+    return rewritten
+
+
 def delete_project_sessions(
     sessions_file: Path,
     project: str,
@@ -353,6 +396,7 @@ def main():
             self.menu.clear()
 
             archived_projects = []
+            all_project_names = [name for name, _, _, _ in projects]
 
             for name, today_secs, total_secs, is_active in projects:
                 if is_archived(meta, name) and not is_active:
@@ -367,6 +411,15 @@ def main():
                 item = rumps.MenuItem(label, callback=lambda _: None) if is_active else rumps.MenuItem(label)
                 self._add_export_items(item, name)
                 if not is_active:
+                    merge_menu = rumps.MenuItem("Merge into...")
+                    for target in all_project_names:
+                        if target != name:
+                            merge_menu.add(rumps.MenuItem(
+                                target,
+                                callback=lambda _, s=name, t=target: self._merge_project(s, t),
+                            ))
+                    if len(merge_menu) > 0:
+                        item.add(merge_menu)
                     item.add(rumps.MenuItem(
                         "Archive",
                         callback=lambda _, p=name: self._archive_project(p),
@@ -445,6 +498,22 @@ def main():
                 "Export as Markdown",
                 callback=lambda _, p=project_name: self._export_report(p, "md"),
             ))
+
+        def _merge_project(self, source, target):
+            self._bring_to_front()
+            response = rumps.alert(
+                title="Confirm Merge",
+                message=f"Merge all sessions from '{source}' into '{target}'?\n"
+                        f"This will reassign all '{source}' records to '{target}' and cannot be undone.",
+                ok="Merge",
+                cancel="Cancel",
+            )
+            if response == 1:
+                merge_project_sessions(SESSIONS_FILE, source, target)
+                meta = load_projects_meta(PROJECTS_META_FILE, LOCK_PATH)
+                remove_project_meta(meta, source)
+                save_projects_meta(PROJECTS_META_FILE, meta, LOCK_PATH)
+                self._schedule_refresh()
 
         def _delete_project(self, project):
             self._bring_to_front()

@@ -8,7 +8,7 @@ from collections import defaultdict
 
 from cc_time_tracker import __version__
 from cc_time_tracker.common import (
-    SESSIONS_FILE, ACTIVE_FILE, load_jsonl,
+    SESSIONS_FILE, ACTIVE_FILE, LOCK_FILE, load_jsonl, acquire_lock,
     BOLD, DIM, GREEN, CYAN, YELLOW, RED, RESET, UNDERLINE,
 )
 
@@ -216,6 +216,44 @@ def print_orphans(records: list[dict], active: list[dict] | None = None):
     print(f"\n  {DIM}Tip: These may be crashed sessions. They don't count in totals.{RESET}")
 
 
+def merge_project_sessions(source: str, target: str) -> int:
+    """Rewrite all sessions for source project to target project in sessions.jsonl.
+
+    Returns number of records rewritten.
+    """
+    with acquire_lock():
+        try:
+            raw = SESSIONS_FILE.read_text()
+        except FileNotFoundError:
+            return 0
+        if not raw.strip():
+            return 0
+
+        new_lines = []
+        rewritten = 0
+
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                new_lines.append(line)
+                continue
+
+            if record.get("project") == source:
+                record["project"] = target
+                rewritten += 1
+                new_lines.append(json.dumps(record))
+            else:
+                new_lines.append(line)
+
+        SESSIONS_FILE.write_text("\n".join(new_lines) + "\n" if new_lines else "")
+
+    return rewritten
+
+
 def export_csv(sessions: list[dict]):
     """Export completed sessions as CSV to stdout."""
     print("date,project,cwd,session_id,duration_seconds,duration_hours,reason")
@@ -295,6 +333,26 @@ def main():
 
     elif command == "orphans":
         print_orphans(records)
+
+    elif command == "merge":
+        if len(args) < 3:
+            print(f"{RED}Usage: cc-time-report merge <source> <target>{RESET}")
+            sys.exit(1)
+        source = args[1]
+        target = args[2]
+
+        # Check source isn't currently active
+        active = load_active()
+        active_projects = {a.get("project") for a in active}
+        if source in active_projects:
+            print(f"{RED}Cannot merge '{source}' — it has an active session.{RESET}")
+            sys.exit(1)
+
+        count = merge_project_sessions(source, target)
+        if count:
+            print(f"{GREEN}Merged {count} records from '{source}' into '{target}'.{RESET}")
+        else:
+            print(f"{YELLOW}No records found for '{source}'.{RESET}")
 
     elif command == "csv":
         export_csv(completed)
