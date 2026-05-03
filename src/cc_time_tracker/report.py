@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """cc-time-report — CLI viewer for Claude Code session time tracking."""
 
+import csv
 import json
 import sys
 from datetime import datetime, timezone, timedelta
@@ -10,8 +11,22 @@ from cc_time_tracker import __version__
 from cc_time_tracker.common import (
     SESSIONS_FILE, ACTIVE_FILE, EVENT_START, EVENT_END,
     load_jsonl, acquire_lock, atomic_write_text,
+    coerce_float, csv_safe, strip_control,
     BOLD, DIM, GREEN, CYAN, YELLOW, RED, RESET, UNDERLINE,
 )
+
+
+# Display caps for attacker-controllable strings printed to the terminal.
+# Project names are already clamped to 64 at write time, but cwd is stored
+# verbatim and a malicious repo can sit deep under e.g. ~/giant-prefix/...
+_DISPLAY_PROJECT_MAX = 64
+_DISPLAY_CWD_MAX = 200
+_DISPLAY_REASON_MAX = 64
+_DISPLAY_TS_MAX = 32
+
+
+def _safe(value, max_len: int) -> str:
+    return strip_control("" if value is None else str(value), max_len=max_len)
 
 
 def load_sessions(after_ts: float | None = None) -> list[dict]:
@@ -70,10 +85,10 @@ def get_start_of_month() -> datetime:
 
 def aggregate_by_project(sessions: list[dict]) -> dict[str, dict]:
     """Aggregate duration and session count by project."""
-    projects = defaultdict(lambda: {"total_seconds": 0, "session_count": 0, "cwd": ""})
+    projects = defaultdict(lambda: {"total_seconds": 0.0, "session_count": 0, "cwd": ""})
     for s in sessions:
         proj = s.get("project", "unknown")
-        dur = s.get("duration_seconds", 0) or 0
+        dur = coerce_float(s.get("duration_seconds"))
         projects[proj]["total_seconds"] += dur
         projects[proj]["session_count"] += 1
         projects[proj]["cwd"] = s.get("cwd", "")
@@ -84,11 +99,11 @@ def aggregate_by_day(sessions: list[dict]) -> dict[str, dict[str, float]]:
     """Aggregate duration by date → project."""
     days = defaultdict(lambda: defaultdict(float))
     for s in sessions:
-        ts = s.get("timestamp_unix", 0)
+        ts = coerce_float(s.get("timestamp_unix"))
         if ts:
             day = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
             proj = s.get("project", "unknown")
-            dur = s.get("duration_seconds", 0) or 0
+            dur = coerce_float(s.get("duration_seconds"))
             days[day][proj] += dur
     return dict(days)
 
@@ -107,8 +122,14 @@ def print_project_table(projects: dict[str, dict], title: str = "Projects"):
         print(f"  {DIM}No sessions recorded.{RESET}")
         return
 
-    # Sort by total time descending
-    sorted_projects = sorted(projects.items(), key=lambda x: x[1]["total_seconds"], reverse=True)
+    # Sort by total time descending. Sanitize names up-front so attacker
+    # ANSI escapes don't reach the terminal — and so column widths reflect
+    # the *displayed* string, not the raw one.
+    sorted_projects = sorted(
+        ((_safe(name, _DISPLAY_PROJECT_MAX), data) for name, data in projects.items()),
+        key=lambda x: x[1]["total_seconds"],
+        reverse=True,
+    )
 
     total_all = sum(p["total_seconds"] for _, p in sorted_projects)
 
@@ -161,7 +182,8 @@ def print_daily_breakdown(days: dict[str, dict[str, float]]):
         for proj, dur in sorted(projects.items(), key=lambda x: x[1], reverse=True):
             bar_len = int(min(dur / 600, 30))  # 10 min = 1 char, max 30
             bar = "█" * bar_len
-            print(f"    {proj:<20} {format_duration(dur):>10}  {DIM}{bar}{RESET}")
+            safe_proj = _safe(proj, _DISPLAY_PROJECT_MAX)
+            print(f"    {safe_proj:<20} {format_duration(dur):>10}  {DIM}{bar}{RESET}")
 
 
 def print_active_sessions(active: list[dict] | None = None):
@@ -176,16 +198,17 @@ def print_active_sessions(active: list[dict] | None = None):
     now = datetime.now(timezone.utc).timestamp()
 
     for s in active:
-        start_ts = s.get("timestamp_unix", 0)
+        start_ts = coerce_float(s.get("timestamp_unix"))
         elapsed = now - start_ts if start_ts else 0
-        project = s.get("project", "unknown")
-        sid_short = s.get("session_id", "???")[:12]
+        project = _safe(s.get("project", "unknown"), _DISPLAY_PROJECT_MAX)
+        sid_short = _safe(s.get("session_id", "???"), 12)
+        cwd = _safe(s.get("cwd", ""), _DISPLAY_CWD_MAX)
         print(
             f"  {GREEN}●{RESET} {BOLD}{project}{RESET}"
             f"  {YELLOW}{format_duration(elapsed)}{RESET} elapsed"
             f"  {DIM}({sid_short}…){RESET}"
         )
-        print(f"    {DIM}{s.get('cwd', '')}{RESET}")
+        print(f"    {DIM}{cwd}{RESET}")
 
 
 def print_orphans(records: list[dict], active: list[dict] | None = None):
@@ -209,10 +232,15 @@ def print_orphans(records: list[dict], active: list[dict] | None = None):
         print(f"  {GREEN}No orphaned sessions — all clean!{RESET}")
         return
 
-    for sid, r in sorted(orphans.items(), key=lambda x: x[1].get("timestamp_unix", 0), reverse=True):
-        ts = r.get("timestamp", "?")
-        project = r.get("project", "unknown")
-        print(f"  {RED}○{RESET} {project}  started {ts}  {DIM}({sid[:12]}…){RESET}")
+    for sid, r in sorted(
+        orphans.items(),
+        key=lambda x: coerce_float(x[1].get("timestamp_unix")),
+        reverse=True,
+    ):
+        ts = _safe(r.get("timestamp", "?"), _DISPLAY_TS_MAX)
+        project = _safe(r.get("project", "unknown"), _DISPLAY_PROJECT_MAX)
+        sid_short = _safe(sid, 12)
+        print(f"  {RED}○{RESET} {project}  started {ts}  {DIM}({sid_short}…){RESET}")
 
     print(f"\n  {DIM}Tip: These may be crashed sessions. They don't count in totals.{RESET}")
 
@@ -241,18 +269,31 @@ def merge_project_sessions(source: str, target: str) -> int:
 
 
 def export_csv(sessions: list[dict]):
-    """Export completed sessions as CSV to stdout."""
-    print("date,project,cwd,session_id,duration_seconds,duration_hours,reason")
+    """Export completed sessions as CSV to stdout.
+
+    Uses ``csv.writer`` for proper quoting and routes every text field through
+    ``csv_safe`` so that Excel/Sheets won't evaluate formula-leading values
+    (``=``, ``+``, ``-``, ``@``, tab, CR) embedded in attacker-controllable
+    fields like project name or cwd.
+    """
+    writer = csv.writer(sys.stdout, lineterminator="\n")
+    writer.writerow([
+        "date", "project", "cwd", "session_id",
+        "duration_seconds", "duration_hours", "reason",
+    ])
     for s in sessions:
-        ts = s.get("timestamp_unix", 0)
+        ts = coerce_float(s.get("timestamp_unix"))
         date = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S") if ts else ""
-        dur = s.get("duration_seconds", 0) or 0
-        hours = f"{dur / 3600:.4f}"
-        proj = s.get("project", "").replace(",", ";")
-        cwd = s.get("cwd", "").replace(",", ";")
-        sid = s.get("session_id", "")
-        reason = s.get("reason", "")
-        print(f"{date},{proj},{cwd},{sid},{dur},{hours},{reason}")
+        dur = coerce_float(s.get("duration_seconds"))
+        writer.writerow([
+            date,
+            csv_safe(s.get("project", "")),
+            csv_safe(s.get("cwd", "")),
+            csv_safe(s.get("session_id", "")),
+            f"{dur:g}",
+            f"{dur / 3600:.4f}",
+            csv_safe(s.get("reason", "")),
+        ])
 
 
 # ─── Main ─────────────────────────────────────────────────────────────

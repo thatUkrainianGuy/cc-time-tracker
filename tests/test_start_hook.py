@@ -199,3 +199,67 @@ def test_start_hook_bad_stdin():
             main()
         except SystemExit as e:
             assert e.code == 1
+
+
+def test_start_hook_tolerates_poisoned_active_records(tmp_path):
+    """A type-confused active.jsonl (e.g. pid='x') must not crash the hook."""
+    sessions = tmp_path / "sessions.jsonl"
+    active = tmp_path / "active.jsonl"
+
+    poisoned = json.dumps({
+        "event": "start", "session_id": "bad-1",
+        "cwd": "/tmp/bad", "project": "bad",
+        "timestamp_unix": "not-a-number",
+        "pid": "not-a-pid",
+    })
+    active.write_text(poisoned + "\n")
+
+    input_data = json.dumps({
+        "session_id": "fresh-1",
+        "cwd": "/home/user/myproject",
+        "source": "startup",
+    })
+
+    with (
+        patch("cc_time_tracker.common.TRACKING_DIR", tmp_path),
+        patch("cc_time_tracker.common.SESSIONS_FILE", sessions),
+        patch("cc_time_tracker.common.ACTIVE_FILE", active),
+        patch("cc_time_tracker.common.LOCK_FILE", tmp_path / ".lock"),
+        patch("cc_time_tracker.start_hook.SESSIONS_FILE", sessions),
+        patch("cc_time_tracker.start_hook.ACTIVE_FILE", active),
+        patch("sys.stdin", StringIO(input_data)),
+    ):
+        try:
+            main()
+        except SystemExit as e:
+            assert e.code == 0
+
+
+def test_start_hook_strips_control_chars_from_input(tmp_path):
+    """Hook input fields must be sanitized before persisting."""
+    sessions = tmp_path / "sessions.jsonl"
+    active = tmp_path / "active.jsonl"
+
+    input_data = json.dumps({
+        "session_id": "abc\x1b[31m123",
+        "cwd": "/home/user/myproject",
+        "source": "start\x00up",
+    })
+
+    with (
+        patch("cc_time_tracker.common.TRACKING_DIR", tmp_path),
+        patch("cc_time_tracker.common.SESSIONS_FILE", sessions),
+        patch("cc_time_tracker.common.ACTIVE_FILE", active),
+        patch("cc_time_tracker.common.LOCK_FILE", tmp_path / ".lock"),
+        patch("cc_time_tracker.start_hook.SESSIONS_FILE", sessions),
+        patch("cc_time_tracker.start_hook.ACTIVE_FILE", active),
+        patch("sys.stdin", StringIO(input_data)),
+    ):
+        try:
+            main()
+        except SystemExit as e:
+            assert e.code == 0
+
+    rec = json.loads(active.read_text().strip())
+    assert rec["session_id"] == "abc123"
+    assert rec["source"] == "startup"

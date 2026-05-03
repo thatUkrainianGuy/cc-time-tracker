@@ -10,8 +10,11 @@ Usage:
 Requires: pip install rumps
 """
 
+import csv
+import io
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,6 +25,31 @@ PROJECTS_META_FILE = TRACKING_DIR / "projects.json"
 LOCK_PATH = TRACKING_DIR / ".lock"
 REFRESH_INTERVAL = 30  # seconds
 EVENT_END = "end"
+
+# Sanitization helpers — kept inline to preserve menubar's standalone story
+# (see CLAUDE.md). Mirrors cc_time_tracker.common.{strip_control,csv_safe,md_safe}.
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_FORMULA_LEADS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _strip_control(text) -> str:
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
+    return _CTRL_RE.sub("", _ANSI_RE.sub("", text))
+
+
+def _csv_safe(value) -> str:
+    text = _strip_control(value)
+    if text and text[0] in _FORMULA_LEADS:
+        text = "'" + text
+    return text
+
+
+def _md_safe(value) -> str:
+    return _strip_control(value).replace("|", r"\|")
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -42,7 +70,7 @@ def format_duration(seconds: float) -> str:
 
 
 def _read_jsonl(path: Path) -> list[dict]:
-    """Read a JSONL file, skipping malformed lines. Returns [] if file missing."""
+    """Read a JSONL file, skipping malformed lines and non-dict records."""
     try:
         f = open(path, "r")
     except FileNotFoundError:
@@ -55,10 +83,30 @@ def _read_jsonl(path: Path) -> list[dict]:
             if not line:
                 continue
             try:
-                records.append(json.loads(line))
+                rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if isinstance(rec, dict):
+                records.append(rec)
     return records
+
+
+def _coerce_float(value, default: float = 0.0) -> float:
+    """Best-effort float coercion — returns ``default`` on bad input.
+
+    Defends every aggregation/sort against a poisoned record like
+    ``{"timestamp_unix": "x"}`` which would otherwise crash the menubar.
+    """
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default
 
 
 def _acquire_lock(lock_path):
@@ -113,11 +161,11 @@ def _aggregate_sessions_by_date(project: str, sessions: list[dict]) -> list[tupl
     for s in sessions:
         if s.get("project") != project:
             continue
-        ts = s.get("timestamp_unix", 0)
+        ts = _coerce_float(s.get("timestamp_unix"))
         if not ts:
             continue
         day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-        days.setdefault(day, []).append(s.get("duration_seconds", 0) or 0)
+        days.setdefault(day, []).append(_coerce_float(s.get("duration_seconds")))
 
     return sorted(
         [(day, len(durations), sum(durations)) for day, durations in days.items()]
@@ -125,25 +173,39 @@ def _aggregate_sessions_by_date(project: str, sessions: list[dict]) -> list[tupl
 
 
 def generate_csv_report(project: str, sessions: list[dict]) -> str:
-    """Generate a CSV report for a project."""
+    """Generate a CSV report for a project.
+
+    Uses ``csv.writer`` for proper quoting and routes the project name
+    through ``_csv_safe`` so a project called e.g. ``=HYPERLINK(...)``
+    doesn't fire a formula when the file is opened in Excel/Sheets.
+    """
     rows = _aggregate_sessions_by_date(project, sessions)
-    lines = ["Date,Project,Sessions,Duration,Hours"]
+    safe_project = _csv_safe(project)
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(["Date", "Project", "Sessions", "Duration", "Hours"])
     total_sessions = 0
     total_seconds = 0.0
     for day, count, secs in rows:
         total_sessions += count
         total_seconds += secs
-        lines.append(f"{day},{project},{count},{format_duration(secs)},{secs / 3600:.2f}")
-    lines.append(f"Total,,{total_sessions},{format_duration(total_seconds)},{total_seconds / 3600:.2f}")
-    return "\n".join(lines) + "\n"
+        writer.writerow([day, safe_project, count, format_duration(secs), f"{secs / 3600:.2f}"])
+    writer.writerow(["Total", "", total_sessions, format_duration(total_seconds), f"{total_seconds / 3600:.2f}"])
+    return buf.getvalue()
 
 
 def generate_md_report(project: str, sessions: list[dict]) -> str:
-    """Generate a Markdown report for a project."""
+    """Generate a Markdown report for a project.
+
+    Project names go through ``_md_safe`` (escapes ``|``, strips control
+    chars and embedded newlines) so a project name can't break out of the
+    table or inject extra headings.
+    """
     rows = _aggregate_sessions_by_date(project, sessions)
     today = datetime.now().strftime("%Y-%m-%d")
+    safe_project = _md_safe(project)
     lines = [
-        f"# {project} — Time Report",
+        f"# {safe_project} — Time Report",
         "",
         f"Generated: {today}",
         "",
@@ -187,6 +249,9 @@ def _rewrite_jsonl(path: Path, transform) -> int:
         try:
             record = json.loads(stripped)
         except json.JSONDecodeError:
+            new_lines.append(stripped)
+            continue
+        if not isinstance(record, dict):
             new_lines.append(stripped)
             continue
         result = transform(record)
@@ -254,7 +319,7 @@ def load_today_sessions(sessions_file: Path) -> list[dict]:
         r for r in _read_jsonl(sessions_file)
         if r.get("event") == EVENT_END
         and r.get("duration_seconds") is not None
-        and r.get("timestamp_unix", 0) >= today_start
+        and _coerce_float(r.get("timestamp_unix")) >= today_start
     ]
 
 
@@ -290,17 +355,17 @@ def build_project_data(
 
     for s in today_sessions:
         proj = s.get("project", "unknown")
-        dur = s.get("duration_seconds", 0) or 0
+        dur = _coerce_float(s.get("duration_seconds"))
         today_time[proj] = today_time.get(proj, 0) + dur
 
     for s in all_sessions:
         proj = s.get("project", "unknown")
-        dur = s.get("duration_seconds", 0) or 0
+        dur = _coerce_float(s.get("duration_seconds"))
         total_time[proj] = total_time.get(proj, 0) + dur
 
     for s in active_sessions:
         proj = s.get("project", "unknown")
-        start_ts = s.get("timestamp_unix", now)
+        start_ts = _coerce_float(s.get("timestamp_unix"), default=now)
         elapsed = max(0, now - start_ts)
         today_time[proj] = today_time.get(proj, 0) + elapsed
         total_time[proj] = total_time.get(proj, 0) + elapsed

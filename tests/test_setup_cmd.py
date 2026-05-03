@@ -72,3 +72,16 @@ def test_merge_hooks_creates_settings_file(tmp_path):
     assert settings_file.exists()
     settings = json.loads(settings_file.read_text())
     assert "SessionStart" in settings["hooks"]
+
+
+def test_merge_hooks_quotes_python_path_with_spaces(tmp_path):
+    """A Python path containing spaces must be shell-quoted in the command."""
+    settings_file = tmp_path / "settings.json"
+    weird_path = "/Applications/My Apps/python3"
+    merge_hooks(settings_file, weird_path)
+
+    settings = json.loads(settings_file.read_text())
+    cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    # shlex.quote wraps in single quotes when whitespace is present.
+    assert cmd.startswith("'/Applications/My Apps/python3'")
+    assert cmd.endswith("-m cc_time_tracker.start_hook")

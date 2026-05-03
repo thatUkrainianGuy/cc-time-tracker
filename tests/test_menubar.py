@@ -541,3 +541,92 @@ class TestGenerateReport:
         md = self.mod.generate_md_report("proj-a", [])
         assert "**Total**" in md
         assert "0.00" in md
+
+    def test_generate_csv_neutralizes_formula_in_project_name(self):
+        """A project named ``=HYPERLINK(...)`` must not fire as a formula."""
+        sessions = [
+            {"project": "=HYPERLINK(\"http://x\")", "event": "end",
+             "duration_seconds": 60,
+             "timestamp_unix": 1742515200.0,
+             "session_id": "s1", "reason": "user_exit"},
+        ]
+        csv_text = self.mod.generate_csv_report("=HYPERLINK(\"http://x\")", sessions)
+        # Each non-header data line's project field must start with a quote.
+        # csv.writer wraps the value in double quotes since it contains ",
+        # so we look for the leading `'` after the opening `"`.
+        lines = csv_text.strip().split("\n")
+        assert lines[0] == "Date,Project,Sessions,Duration,Hours"
+        # First data row: 2025-03-21,"'=HYPERLINK(""http://x"")",1,...
+        assert "\"'=HYPERLINK" in lines[1]
+
+    def test_generate_csv_strips_ansi_escapes(self):
+        sessions = [
+            {"project": "\x1b[31mevil\x1b[0m", "event": "end",
+             "duration_seconds": 60,
+             "timestamp_unix": 1742515200.0,
+             "session_id": "s1", "reason": "user_exit"},
+        ]
+        # The aggregator filters by project name, so we pass the raw name as
+        # the project arg too — the helper itself sees the same string.
+        csv_text = self.mod.generate_csv_report("\x1b[31mevil\x1b[0m", sessions)
+        assert "\x1b" not in csv_text
+
+    def test_generate_md_escapes_pipes_in_project_name(self):
+        md = self.mod.generate_md_report("a|b|c", [])
+        # The heading should have escaped pipes
+        assert "# a\\|b\\|c" in md
+
+    def test_generate_md_strips_newlines_in_project_name(self):
+        """A project named with embedded newlines must not start a new heading.
+
+        Stripping control chars (including \\n) collapses the value into a
+        single line, so even though the raw substring may survive, it can no
+        longer escape the existing ``# {name} — Time Report`` heading line.
+        """
+        md = self.mod.generate_md_report("foo\n# pwned", [])
+        # No standalone heading was injected — only the original ``# foo``
+        # heading exists. Count lines that begin with '# '.
+        heading_lines = [l for l in md.splitlines() if l.startswith("# ")]
+        assert len(heading_lines) == 1
+        assert "\n# pwned" not in md
+
+
+class TestPoisonedRecords:
+    """A type-confused JSONL record must not crash the menubar."""
+
+    def setup_method(self):
+        self.mod = load_menubar()
+        self.tmpdir = tempfile.mkdtemp()
+        self.sessions_file = Path(self.tmpdir) / "sessions.jsonl"
+
+    def test_load_today_tolerates_string_timestamp(self):
+        """``timestamp_unix: "x"`` would crash a comparison; coerce_float saves us."""
+        lines = [
+            json.dumps({"event": "end", "duration_seconds": 60,
+                        "timestamp_unix": "not-a-number", "project": "x"}),
+            make_end_record("s1", "proj", "/tmp/proj", datetime.now(timezone.utc).timestamp(), 60),
+        ]
+        self.sessions_file.write_text("\n".join(lines) + "\n")
+        # Should not raise — the bad record gets timestamp coerced to 0,
+        # therefore filtered out as "not today".
+        result = self.mod.load_today_sessions(self.sessions_file)
+        assert all(r.get("project") == "proj" for r in result)
+
+    def test_build_project_data_tolerates_bad_duration(self):
+        """A poisoned ``duration_seconds: "x"`` should be treated as 0."""
+        today = [{"project": "proj", "duration_seconds": "garbage"}]
+        all_time = [{"project": "proj", "duration_seconds": "garbage"}]
+        projects, today_total = self.mod.build_project_data(today, all_time, [])
+        # Bad durations coerce to 0, project still appears with 0s.
+        assert today_total == 0
+        if projects:
+            _, today_secs, total_secs, _ = projects[0]
+            assert today_secs == 0
+            assert total_secs == 0
+
+    def test_read_jsonl_skips_non_dict_records(self):
+        self.sessions_file.write_text(
+            '{"a":1}\n[1,2,3]\n42\n"string"\nnull\n{"b":2}\n'
+        )
+        result = self.mod._read_jsonl(self.sessions_file)
+        assert result == [{"a": 1}, {"b": 2}]

@@ -1,11 +1,13 @@
 """cc-time-setup — register time-tracking hooks in Claude Code settings."""
 
 import json
+import shlex
 import sys
 from pathlib import Path
 
 from cc_time_tracker.common import (
-    TRACKING_DIR, SETTINGS_FILE, ensure_dir, load_settings, is_tracker_hook_group,
+    TRACKING_DIR, SETTINGS_FILE, ensure_dir, harden_file_perms,
+    load_settings, is_tracker_hook_group,
     BOLD, GREEN, YELLOW, DIM, RESET,
 )
 
@@ -36,12 +38,16 @@ def merge_hooks(settings_file: Path, python_path: str) -> None:
         print(f"  {YELLOW}⚠ Hooks already registered — skipping{RESET}")
         return
 
+    # Hooks run via the shell, so shell-quote the interpreter path. Avoids
+    # breakage when sys.executable lives under a path with spaces or shell
+    # metacharacters (e.g. "/Applications/My Apps/python3").
+    py = shlex.quote(python_path)
     new_hooks = {
         "SessionStart": [{
             "matcher": "",
             "hooks": [{
                 "type": "command",
-                "command": f"{python_path} -m cc_time_tracker.start_hook",
+                "command": f"{py} -m cc_time_tracker.start_hook",
                 "timeout": 5,
             }],
         }],
@@ -49,7 +55,7 @@ def merge_hooks(settings_file: Path, python_path: str) -> None:
             "matcher": "",
             "hooks": [{
                 "type": "command",
-                "command": f"{python_path} -m cc_time_tracker.end_hook",
+                "command": f"{py} -m cc_time_tracker.end_hook",
                 "timeout": 5,
             }],
         }],
@@ -82,6 +88,12 @@ def main():
     print(f"\n{BOLD}Claude Code Time Tracker — Setup{RESET}\n")
 
     ensure_dir()
+    # Tighten any pre-existing data files left from older versions that
+    # created them with the umask-derived (often world-readable) mode.
+    for name in ("sessions.jsonl", "active.jsonl", "projects.json"):
+        p = TRACKING_DIR / name
+        if p.exists():
+            harden_file_perms(p)
     print(f"  {GREEN}✓ Created {TRACKING_DIR}/{RESET}")
 
     python_path = sys.executable

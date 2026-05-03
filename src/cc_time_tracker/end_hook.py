@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from cc_time_tracker.common import (
     SESSIONS_FILE, ACTIVE_FILE, EVENT_START, EVENT_END,
     acquire_lock, extract_project_name, load_jsonl, read_hook_input,
+    coerce_float, strip_control,
 )
 
 HOOK_LOCK_TIMEOUT_SECONDS = 2
@@ -32,9 +33,9 @@ def find_and_remove_active(active_file, session_id: str) -> tuple[dict | None, l
 def main():
     input_data = read_hook_input()
 
-    session_id = input_data.get("session_id", "unknown")
-    cwd = input_data.get("cwd", os.getcwd())
-    reason = input_data.get("reason", "unknown")
+    session_id = strip_control(str(input_data.get("session_id", "unknown")), max_len=128)
+    cwd = strip_control(str(input_data.get("cwd", os.getcwd())), max_len=4096)
+    reason = strip_control(str(input_data.get("reason", "unknown")), max_len=64)
 
     now = datetime.now(timezone.utc)
     now_ts = now.timestamp()
@@ -43,7 +44,10 @@ def main():
         start_record, remaining = find_and_remove_active(ACTIVE_FILE, session_id)
 
         if start_record:
-            duration_seconds = now_ts - start_record.get("timestamp_unix", 0)
+            # coerce_float prevents a poisoned active.jsonl record (e.g.
+            # ``timestamp_unix: "x"``) from blowing up the SessionEnd hook.
+            start_ts = coerce_float(start_record.get("timestamp_unix"))
+            duration_seconds = now_ts - start_ts if start_ts else None
             project = start_record.get("project") or extract_project_name(cwd)
         else:
             duration_seconds = None
