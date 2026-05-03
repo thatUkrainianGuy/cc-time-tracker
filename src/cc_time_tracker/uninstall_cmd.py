@@ -5,32 +5,24 @@ import sys
 from pathlib import Path
 
 from cc_time_tracker.common import (
-    TRACKING_DIR, SETTINGS_FILE, load_settings,
+    TRACKING_DIR, SETTINGS_FILE, load_settings, is_tracker_hook_group,
     BOLD, GREEN, RED, DIM, RESET,
 )
 
 
 def remove_hooks(settings_file: Path) -> None:
-    """Remove cc_time_tracker hook entries from settings.json."""
     if not settings_file.exists():
         print(f"  {DIM}No settings.json found — nothing to remove.{RESET}")
         return
 
     settings = load_settings(settings_file)
-    if not settings and settings_file.exists():
-        print(f"  {RED}Could not parse {settings_file}{RESET}")
-        return
-
     hooks = settings.get("hooks", {})
     changed = False
 
     for event in ("SessionStart", "SessionEnd"):
         if event in hooks:
             original_len = len(hooks[event])
-            hooks[event] = [
-                group for group in hooks[event]
-                if not any("cc_time_tracker" in h.get("command", "") for h in group.get("hooks", []))
-            ]
+            hooks[event] = [g for g in hooks[event] if not is_tracker_hook_group(g)]
             if len(hooks[event]) != original_len:
                 changed = True
 

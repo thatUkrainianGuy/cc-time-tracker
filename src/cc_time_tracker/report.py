@@ -8,7 +8,8 @@ from collections import defaultdict
 
 from cc_time_tracker import __version__
 from cc_time_tracker.common import (
-    SESSIONS_FILE, ACTIVE_FILE, LOCK_FILE, load_jsonl, acquire_lock,
+    SESSIONS_FILE, ACTIVE_FILE, EVENT_START, EVENT_END,
+    load_jsonl, acquire_lock, atomic_write_text,
     BOLD, DIM, GREEN, CYAN, YELLOW, RED, RESET, UNDERLINE,
 )
 
@@ -22,7 +23,7 @@ def load_active() -> list[dict]:
 
 def get_completed_sessions(records: list[dict]) -> list[dict]:
     """Extract completed sessions (end events with duration)."""
-    return [r for r in records if r.get("event") == "end" and r.get("duration_seconds") is not None]
+    return [r for r in records if r.get("event") == EVENT_END and r.get("duration_seconds") is not None]
 
 
 def format_duration(seconds: float) -> str:
@@ -194,9 +195,9 @@ def print_orphans(records: list[dict], active: list[dict] | None = None):
     starts = {}
     for r in records:
         sid = r.get("session_id")
-        if r.get("event") == "start":
+        if r.get("event") == EVENT_START:
             starts[sid] = r
-        elif r.get("event") == "end" and sid in starts:
+        elif r.get("event") == EVENT_END and sid in starts:
             del starts[sid]
 
     if active is None:
@@ -222,36 +223,21 @@ def merge_project_sessions(source: str, target: str) -> int:
     Returns number of records rewritten.
     """
     with acquire_lock():
-        try:
-            raw = SESSIONS_FILE.read_text()
-        except FileNotFoundError:
-            return 0
-        if not raw.strip():
+        records = load_jsonl(SESSIONS_FILE)
+        if not records:
             return 0
 
-        new_lines = []
         rewritten = 0
-
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                new_lines.append(line)
-                continue
-
+        for record in records:
             if record.get("project") == source:
                 record["project"] = target
                 rewritten += 1
-                new_lines.append(json.dumps(record))
-            else:
-                new_lines.append(line)
 
-        SESSIONS_FILE.write_text("\n".join(new_lines) + "\n" if new_lines else "")
-
-    return rewritten
+        atomic_write_text(
+            SESSIONS_FILE,
+            "\n".join(json.dumps(r) for r in records) + "\n",
+        )
+        return rewritten
 
 
 def export_csv(sessions: list[dict]):

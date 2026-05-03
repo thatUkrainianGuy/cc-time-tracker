@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from cc_time_tracker.common import (
-    TRACKING_DIR, SETTINGS_FILE, ensure_dir, load_settings,
+    TRACKING_DIR, SETTINGS_FILE, ensure_dir, load_settings, is_tracker_hook_group,
     BOLD, GREEN, YELLOW, DIM, RESET,
 )
 
@@ -17,16 +17,14 @@ OLD_BIN_FILE = Path.home() / ".local" / "bin" / "cc-time-report"
 
 
 def _has_tracker_hooks(settings: dict) -> bool:
-    """Check if cc-time-tracker hooks are already in parsed settings."""
-    for group in settings.get("hooks", {}).get("SessionStart", []):
-        for hook in group.get("hooks", []):
-            if "cc_time_tracker" in hook.get("command", ""):
-                return True
-    return False
+    """True if any SessionStart group in settings is one of ours."""
+    return any(
+        is_tracker_hook_group(group)
+        for group in settings.get("hooks", {}).get("SessionStart", [])
+    )
 
 
 def is_already_installed(settings_file: Path) -> bool:
-    """Check if cc-time-tracker hooks are already in settings."""
     return _has_tracker_hooks(load_settings(settings_file))
 
 

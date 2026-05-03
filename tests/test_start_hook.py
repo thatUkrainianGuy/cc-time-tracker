@@ -103,6 +103,95 @@ def test_start_hook_cleans_orphans(tmp_path):
     assert "new-1" in active_ids
 
 
+def test_start_hook_cleans_dead_pid(tmp_path):
+    """Active entries whose recorded pid is no longer running should be cleaned up."""
+    sessions = tmp_path / "sessions.jsonl"
+    active = tmp_path / "active.jsonl"
+
+    import time
+    now_ts = time.time()
+
+    dead_pid_rec = json.dumps({
+        "event": "start", "session_id": "crashed-1",
+        "cwd": "/home/user/foo", "project": "foo",
+        "timestamp_unix": now_ts - 60,  # only 1 min old, but pid is dead
+        "pid": 999999,
+    })
+    live_pid_rec = json.dumps({
+        "event": "start", "session_id": "live-1",
+        "cwd": "/home/user/bar", "project": "bar",
+        "timestamp_unix": now_ts - 60,
+        "pid": 1,  # init, always alive
+    })
+    active.write_text(dead_pid_rec + "\n" + live_pid_rec + "\n")
+    sessions.write_text("")
+
+    input_data = json.dumps({
+        "session_id": "new-1",
+        "cwd": "/home/user/myproject",
+        "source": "startup",
+    })
+
+    def fake_alive(pid):
+        return pid != 999999
+
+    with (
+        patch("cc_time_tracker.common.TRACKING_DIR", tmp_path),
+        patch("cc_time_tracker.common.SESSIONS_FILE", sessions),
+        patch("cc_time_tracker.common.ACTIVE_FILE", active),
+        patch("cc_time_tracker.common.LOCK_FILE", tmp_path / ".lock"),
+        patch("cc_time_tracker.start_hook.SESSIONS_FILE", sessions),
+        patch("cc_time_tracker.start_hook.ACTIVE_FILE", active),
+        patch("cc_time_tracker.start_hook._pid_alive", side_effect=fake_alive),
+        patch("sys.stdin", StringIO(input_data)),
+    ):
+        try:
+            main()
+        except SystemExit as e:
+            assert e.code == 0
+
+    sess_records = [json.loads(l) for l in sessions.read_text().strip().split("\n")]
+    orphan_end = [r for r in sess_records if r.get("reason") == "orphan_cleanup"]
+    assert len(orphan_end) == 1
+    assert orphan_end[0]["session_id"] == "crashed-1"
+
+    active_records = [json.loads(l) for l in active.read_text().strip().split("\n")]
+    active_ids = {r["session_id"] for r in active_records}
+    assert "crashed-1" not in active_ids
+    assert "live-1" in active_ids
+    assert "new-1" in active_ids
+
+
+def test_start_hook_records_pid(tmp_path):
+    """New start records should include the parent process's pid."""
+    sessions = tmp_path / "sessions.jsonl"
+    active = tmp_path / "active.jsonl"
+
+    input_data = json.dumps({
+        "session_id": "test-pid",
+        "cwd": "/home/user/proj",
+        "source": "startup",
+    })
+
+    with (
+        patch("cc_time_tracker.common.TRACKING_DIR", tmp_path),
+        patch("cc_time_tracker.common.SESSIONS_FILE", sessions),
+        patch("cc_time_tracker.common.ACTIVE_FILE", active),
+        patch("cc_time_tracker.common.LOCK_FILE", tmp_path / ".lock"),
+        patch("cc_time_tracker.start_hook.SESSIONS_FILE", sessions),
+        patch("cc_time_tracker.start_hook.ACTIVE_FILE", active),
+        patch("sys.stdin", StringIO(input_data)),
+    ):
+        try:
+            main()
+        except SystemExit as e:
+            assert e.code == 0
+
+    rec = json.loads(active.read_text().strip())
+    assert isinstance(rec.get("pid"), int)
+    assert rec["pid"] > 0
+
+
 def test_start_hook_bad_stdin():
     """Start hook should exit 1 on bad JSON input."""
     with patch("sys.stdin", StringIO("not json")):

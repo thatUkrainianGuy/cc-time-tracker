@@ -3,6 +3,7 @@
 import json
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from cc_time_tracker.common import (
     extract_project_name,
@@ -22,6 +23,84 @@ def test_extract_project_name_trailing_slash():
 
 def test_extract_project_name_root():
     assert extract_project_name("/") == ""
+
+
+def test_extract_project_name_walks_up_to_git_dir(tmp_path):
+    """A subfolder of a git repo should resolve to the repo root's basename."""
+    repo = tmp_path / "myapp"
+    (repo / ".git").mkdir(parents=True)
+    sub = repo / "workers"
+    sub.mkdir()
+
+    with patch("cc_time_tracker.common.Path.home", return_value=tmp_path):
+        assert extract_project_name(str(sub)) == "myapp"
+
+
+def test_extract_project_name_walks_up_to_git_file(tmp_path):
+    """A `.git` file (worktree pointer) should be detected, not just dirs."""
+    repo = tmp_path / "myapp"
+    repo.mkdir()
+    (repo / ".git").write_text("gitdir: /elsewhere\n")
+    sub = repo / "deep" / "nested"
+    sub.mkdir(parents=True)
+
+    with patch("cc_time_tracker.common.Path.home", return_value=tmp_path):
+        assert extract_project_name(str(sub)) == "myapp"
+
+
+def test_extract_project_name_cc_project_override(tmp_path):
+    """`.cc-project` contents should override the directory basename."""
+    repo = tmp_path / "myapp"
+    repo.mkdir()
+    (repo / ".cc-project").write_text("custom-name\n")
+    sub = repo / "workers"
+    sub.mkdir()
+
+    with patch("cc_time_tracker.common.Path.home", return_value=tmp_path):
+        assert extract_project_name(str(sub)) == "custom-name"
+
+
+def test_extract_project_name_cc_project_empty_uses_dir(tmp_path):
+    """An empty `.cc-project` marker should use the marker's directory name."""
+    repo = tmp_path / "no-git-project"
+    repo.mkdir()
+    (repo / ".cc-project").write_text("")
+    sub = repo / "subdir"
+    sub.mkdir()
+
+    with patch("cc_time_tracker.common.Path.home", return_value=tmp_path):
+        assert extract_project_name(str(sub)) == "no-git-project"
+
+
+def test_extract_project_name_cc_project_beats_git(tmp_path):
+    """When both markers exist, `.cc-project` wins (explicit > implicit)."""
+    repo = tmp_path / "myapp"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".cc-project").write_text("renamed\n")
+
+    with patch("cc_time_tracker.common.Path.home", return_value=tmp_path):
+        assert extract_project_name(str(repo)) == "renamed"
+
+
+def test_extract_project_name_no_marker_falls_back(tmp_path):
+    """Without any marker, fall back to basename(cwd)."""
+    sub = tmp_path / "loose" / "folder"
+    sub.mkdir(parents=True)
+
+    with patch("cc_time_tracker.common.Path.home", return_value=tmp_path):
+        assert extract_project_name(str(sub)) == "folder"
+
+
+def test_extract_project_name_stops_at_home(tmp_path):
+    """Walk must not cross $HOME — a `.git` in home shouldn't claim sessions."""
+    home = tmp_path
+    (home / ".git").mkdir()  # dotfiles repo at $HOME
+    sub = home / "scratch" / "experiment"
+    sub.mkdir(parents=True)
+
+    with patch("cc_time_tracker.common.Path.home", return_value=home):
+        # Should NOT return "tmp_path basename" — should fall back to "experiment"
+        assert extract_project_name(str(sub)) == "experiment"
 
 
 def test_load_jsonl_empty_file(tmp_path):

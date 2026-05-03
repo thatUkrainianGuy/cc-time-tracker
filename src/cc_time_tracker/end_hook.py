@@ -6,32 +6,26 @@ import sys
 from datetime import datetime, timezone
 
 from cc_time_tracker.common import (
-    SESSIONS_FILE, ACTIVE_FILE,
-    acquire_lock, extract_project_name, read_hook_input,
+    SESSIONS_FILE, ACTIVE_FILE, EVENT_START, EVENT_END,
+    acquire_lock, extract_project_name, load_jsonl, read_hook_input,
 )
 
+HOOK_LOCK_TIMEOUT_SECONDS = 2
 
-def read_and_filter_active(active_file, session_id: str) -> tuple[dict | None, list[str]]:
-    """Read active.jsonl once, returning the matching start record and remaining lines."""
-    match = None
-    remaining = []
-    try:
-        f = open(active_file, "r")
-    except FileNotFoundError:
-        return None, []
-    with f:
-        for line in f:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                record = json.loads(stripped)
-                if record.get("session_id") == session_id and record.get("event") == "start":
-                    match = record
-                else:
-                    remaining.append(stripped)
-            except json.JSONDecodeError:
-                remaining.append(stripped)
+
+def find_and_remove_active(active_file, session_id: str) -> tuple[dict | None, list[dict]]:
+    """Return (matching start record or None, remaining active records)."""
+    match: dict | None = None
+    remaining: list[dict] = []
+    for record in load_jsonl(active_file):
+        if (
+            match is None
+            and record.get("session_id") == session_id
+            and record.get("event") == EVENT_START
+        ):
+            match = record
+        else:
+            remaining.append(record)
     return match, remaining
 
 
@@ -45,20 +39,21 @@ def main():
     now = datetime.now(timezone.utc)
     now_ts = now.timestamp()
 
-    with acquire_lock():
-        start_record, remaining_lines = read_and_filter_active(ACTIVE_FILE, session_id)
+    with acquire_lock(timeout=HOOK_LOCK_TIMEOUT_SECONDS):
+        start_record, remaining = find_and_remove_active(ACTIVE_FILE, session_id)
 
         if start_record:
-            start_ts = start_record.get("timestamp_unix", 0)
-            duration_seconds = now_ts - start_ts
+            duration_seconds = now_ts - start_record.get("timestamp_unix", 0)
+            project = start_record.get("project") or extract_project_name(cwd)
         else:
             duration_seconds = None
+            project = extract_project_name(cwd)
 
         record = {
-            "event": "end",
+            "event": EVENT_END,
             "session_id": session_id,
             "cwd": cwd,
-            "project": extract_project_name(cwd),
+            "project": project,
             "reason": reason,
             "timestamp": now.isoformat(),
             "timestamp_unix": now_ts,
@@ -69,8 +64,8 @@ def main():
             f.write(json.dumps(record) + "\n")
 
         with open(ACTIVE_FILE, "w") as f:
-            for line in remaining_lines:
-                f.write(line + "\n")
+            for rec in remaining:
+                f.write(json.dumps(rec) + "\n")
 
     sys.exit(0)
 

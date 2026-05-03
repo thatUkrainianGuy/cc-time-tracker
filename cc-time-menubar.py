@@ -11,6 +11,7 @@ Requires: pip install rumps
 """
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +21,14 @@ ACTIVE_FILE = TRACKING_DIR / "active.jsonl"
 PROJECTS_META_FILE = TRACKING_DIR / "projects.json"
 LOCK_PATH = TRACKING_DIR / ".lock"
 REFRESH_INTERVAL = 30  # seconds
+EVENT_END = "end"
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write content via temp file + os.replace (POSIX-atomic)."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(content)
+    os.replace(tmp, path)
 
 
 def format_duration(seconds: float) -> str:
@@ -56,7 +65,7 @@ def _acquire_lock(lock_path):
     """Optional filelock context manager — no-op if filelock not installed."""
     try:
         from filelock import FileLock
-        return FileLock(lock_path, timeout=5)
+        return FileLock(str(lock_path), timeout=5)
     except ImportError:
         from contextlib import contextmanager
 
@@ -68,7 +77,6 @@ def _acquire_lock(lock_path):
 
 
 def load_projects_meta(projects_file: Path, lock_path: Path) -> dict:
-    """Load projects.json metadata. Returns {} if missing or invalid."""
     with _acquire_lock(lock_path):
         try:
             return json.loads(projects_file.read_text())
@@ -79,23 +87,20 @@ def load_projects_meta(projects_file: Path, lock_path: Path) -> dict:
 def save_projects_meta(projects_file: Path, meta: dict, lock_path: Path) -> None:
     """Write projects.json atomically under lock."""
     with _acquire_lock(lock_path):
-        projects_file.write_text(json.dumps(meta, indent=2) + "\n")
+        _atomic_write_text(projects_file, json.dumps(meta, indent=2) + "\n")
 
 
 def is_archived(meta: dict, project: str) -> bool:
-    """Check if a project is archived. Defaults to False if absent."""
     return meta.get(project, {}).get("archived", False)
 
 
 def set_archived(meta: dict, project: str, archived: bool) -> None:
-    """Set archived status for a project in the meta dict (in-place)."""
     if project not in meta:
         meta[project] = {}
     meta[project]["archived"] = archived
 
 
 def remove_project_meta(meta: dict, project: str) -> None:
-    """Remove a project's metadata entry (in-place). No-op if absent."""
     meta.pop(project, None)
 
 
@@ -157,6 +162,45 @@ def generate_md_report(project: str, sessions: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _rewrite_jsonl(path: Path, transform) -> int:
+    """Walk a JSONL file; rewrite atomically with `transform` applied to each record.
+
+    `transform(record)` returns:
+      - a dict to keep (counts as changed iff a different object than the input),
+      - None to drop the record (counts as changed).
+    Malformed lines are preserved verbatim. Returns the change count.
+    Caller is responsible for holding the file lock around this call.
+    """
+    try:
+        raw = path.read_text()
+    except FileNotFoundError:
+        return 0
+    if not raw.strip():
+        return 0
+
+    new_lines = []
+    changed = 0
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            record = json.loads(stripped)
+        except json.JSONDecodeError:
+            new_lines.append(stripped)
+            continue
+        result = transform(record)
+        if result is None:
+            changed += 1
+            continue
+        if result is not record:
+            changed += 1
+        new_lines.append(json.dumps(result))
+
+    _atomic_write_text(path, "\n".join(new_lines) + "\n" if new_lines else "")
+    return changed
+
+
 def merge_project_sessions(
     sessions_file: Path,
     source_project: str,
@@ -167,37 +211,13 @@ def merge_project_sessions(
 
     Returns number of records rewritten.
     """
+    def transform(record):
+        if record.get("project") == source_project:
+            return {**record, "project": target_project}
+        return record
+
     with _acquire_lock(lock_path):
-        try:
-            raw = sessions_file.read_text()
-        except FileNotFoundError:
-            return 0
-        if not raw.strip():
-            return 0
-
-        new_lines = []
-        rewritten = 0
-
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                new_lines.append(line)
-                continue
-
-            if record.get("project") == source_project:
-                record["project"] = target_project
-                rewritten += 1
-                new_lines.append(json.dumps(record))
-            else:
-                new_lines.append(line)
-
-        sessions_file.write_text("\n".join(new_lines) + "\n" if new_lines else "")
-
-    return rewritten
+        return _rewrite_jsonl(sessions_file, transform)
 
 
 def delete_project_sessions(
@@ -212,36 +232,14 @@ def delete_project_sessions(
     """
     today_start = get_today_start_unix() if today_only else None
 
+    def transform(record):
+        if record.get("project") == project:
+            if not today_only or record.get("timestamp_unix", 0) >= today_start:
+                return None
+        return record
+
     with _acquire_lock(lock_path):
-        try:
-            raw = sessions_file.read_text()
-        except FileNotFoundError:
-            return 0
-        if not raw.strip():
-            return 0
-
-        kept_lines = []
-        removed = 0
-
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                kept_lines.append(line)
-                continue
-
-            if record.get("project") == project:
-                if not today_only or record.get("timestamp_unix", 0) >= today_start:
-                    removed += 1
-                    continue
-            kept_lines.append(line)
-
-        sessions_file.write_text("\n".join(kept_lines) + "\n" if kept_lines else "")
-
-    return removed
+        return _rewrite_jsonl(sessions_file, transform)
 
 
 def get_today_start_unix() -> float:
@@ -254,7 +252,7 @@ def load_today_sessions(sessions_file: Path) -> list[dict]:
     today_start = get_today_start_unix()
     return [
         r for r in _read_jsonl(sessions_file)
-        if r.get("event") == "end"
+        if r.get("event") == EVENT_END
         and r.get("duration_seconds") is not None
         and r.get("timestamp_unix", 0) >= today_start
     ]
@@ -264,7 +262,7 @@ def load_all_completed_sessions(sessions_file: Path) -> list[dict]:
     """Load all completed sessions (end events only) from JSONL file, no date filter."""
     return [
         r for r in _read_jsonl(sessions_file)
-        if r.get("event") == "end"
+        if r.get("event") == EVENT_END
         and r.get("duration_seconds") is not None
     ]
 
@@ -378,7 +376,6 @@ def main():
                 if r.get("timestamp_unix", 0) >= today_start
             ]
             meta = load_projects_meta(PROJECTS_META_FILE, LOCK_PATH)
-            self._all_completed = all_completed
 
             meta_changed = False
             for s in active:
@@ -547,7 +544,7 @@ def main():
             self._bring_to_front()
             from AppKit import NSSavePanel
 
-            all_sessions = getattr(self, '_all_completed', None) or load_all_completed_sessions(SESSIONS_FILE)
+            all_sessions = self._cached_all_completed or load_all_completed_sessions(SESSIONS_FILE)
 
             if fmt == "csv":
                 content = generate_csv_report(project, all_sessions)
