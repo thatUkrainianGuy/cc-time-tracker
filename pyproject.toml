@@ -23,6 +23,7 @@ cc-time-report = "cc_time_tracker.report:main"
 cc-time-setup = "cc_time_tracker.setup_cmd:main"
 cc-time-uninstall = "cc_time_tracker.uninstall_cmd:main"
 cc-time-sync = "cc_time_tracker.sync:main"
+cc-time-sync-install = "cc_time_tracker.sync_install:main"
 
 [project.optional-dependencies]
 lock = ["filelock"]
