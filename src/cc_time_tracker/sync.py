@@ -95,6 +95,8 @@ def run_once(dry_run: bool = False) -> int:
     headers = {
         "Authorization": f"Bearer {cfg['api_key']}",
         "Content-Type": "application/json",
+        # Default Python-urllib UA is flagged by Cloudflare Browser Integrity Check (error 1010).
+        "User-Agent": "cc-time-sync/1.0 (+https://github.com/riabchuk/cc-time-tracker)",
     }
     for i in range(0, len(pending), BATCH_SIZE):
         batch = pending[i : i + BATCH_SIZE]
