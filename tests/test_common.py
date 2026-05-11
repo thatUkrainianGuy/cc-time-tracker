@@ -20,6 +20,7 @@ from cc_time_tracker.common import (
     clamp_project_name,
     coerce_float,
     coerce_int,
+    atomic_write_text,
 )
 
 
@@ -324,3 +325,11 @@ def test_ensure_dir_uses_0700(tmp_path):
     # owner-only — no group/other bits
     assert mode & 0o077 == 0
     assert mode & 0o700 == 0o700
+
+
+def test_atomic_write_text_uses_0600(tmp_path):
+    target = tmp_path / "secret.json"
+    atomic_write_text(target, '{"api_key":"secret"}')
+    mode = stat.S_IMODE(os.stat(target).st_mode)
+    assert mode & 0o077 == 0
+    assert target.read_text() == '{"api_key":"secret"}'

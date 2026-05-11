@@ -9,5 +9,6 @@ build/
 dist/
 
 # Claude Code / Superpowers
+.claude/
 .worktrees/
 docs/

@@ -146,6 +146,65 @@ def test_dry_run_does_not_post(workdir):
     assert not (workdir / "sync-cursor.json").exists()
 
 
+def test_rejects_plain_http_endpoint(workdir):
+    (workdir / "sync-config.json").write_text(
+        json.dumps({"endpoint": "http://example.test/api/sync", "api_key": "k"})
+    )
+    with pytest.raises(SystemExit, match="endpoint must be https"):
+        sync.run_once(dry_run=True)
+
+
+def test_allows_localhost_http_endpoint(workdir):
+    (workdir / "sync-config.json").write_text(
+        json.dumps({"endpoint": "http://localhost:8787/api/sync", "api_key": "k"})
+    )
+    rc = sync.run_once(dry_run=True)
+    assert rc == 0
+
+
+def test_rejects_placeholder_api_key(workdir):
+    (workdir / "sync-config.json").write_text(
+        json.dumps({"endpoint": "https://example.test/api/sync", "api_key": "REPLACE_ME"})
+    )
+    with pytest.raises(SystemExit, match="missing api_key"):
+        sync.run_once(dry_run=True)
+
+
+def test_collect_pending_sanitizes_uploaded_identifiers(workdir):
+    write_sessions(
+        workdir / "sessions.jsonl",
+        [
+            {
+                "event": "end",
+                "session_id": "abc\x1b[31m123",
+                "project": "\x1b]8;;https://evil/\x1b\\client\x1b]8;;\x1b\\",
+                "timestamp_unix": 2.0,
+                "duration_seconds": 1.0,
+            },
+        ],
+    )
+    pending = sync.collect_pending(workdir / "sessions.jsonl", set())
+    assert pending[0]["session_id"] == "abc123"
+    assert pending[0]["tracker_name"] == "client"
+
+
+def test_collect_pending_uses_sanitized_session_id_for_cursor_key(workdir):
+    write_sessions(
+        workdir / "sessions.jsonl",
+        [
+            {
+                "event": "end",
+                "session_id": "abc\x1b[31m123",
+                "project": "x",
+                "timestamp_unix": 2.0,
+                "duration_seconds": 1.0,
+            },
+        ],
+    )
+    pending = sync.collect_pending(workdir / "sessions.jsonl", {_key("abc123", 2.0)})
+    assert pending == []
+
+
 def test_5xx_keeps_cursor_unchanged(workdir):
     write_sessions(
         workdir / "sessions.jsonl",

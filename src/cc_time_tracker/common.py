@@ -76,15 +76,14 @@ def acquire_lock(lock_path: Path | None = None, timeout: float = 5):
 def atomic_write_text(path: Path, content: str) -> None:
     """Write content to path via temp file + os.replace (POSIX-atomic).
 
-    The temp file inherits a 0600 mask before being moved into place, so
-    paths created/replaced through this helper land owner-only.
+    The temp file is created as 0600 before any bytes are written, so
+    paths created/replaced through this helper land owner-only without a
+    world-readable window from the process umask.
     """
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(content)
-    try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(content)
     os.replace(tmp, path)
 
 

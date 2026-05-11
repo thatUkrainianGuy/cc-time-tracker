@@ -6,11 +6,12 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Iterable
 
-from .common import load_jsonl, ensure_dir, atomic_write_text, harden_file_perms
+from .common import load_jsonl, ensure_dir, atomic_write_text, harden_file_perms, strip_control
 
 TRACKING_DIR = Path(os.environ.get("CC_TIME_TRACKING_DIR", str(Path.home() / ".claude" / "time-tracking")))
 SESSIONS_FILE = TRACKING_DIR / "sessions.jsonl"
@@ -35,7 +36,18 @@ def _event_key(session_id: str, end_at: float) -> str:
 def _load_config() -> dict[str, str]:
     if not CONFIG_FILE.exists():
         raise SystemExit(f"missing config: {CONFIG_FILE}\nCreate it with {{\"endpoint\": ..., \"api_key\": ...}}")
-    return json.loads(CONFIG_FILE.read_text())
+    cfg = json.loads(CONFIG_FILE.read_text())
+    if not isinstance(cfg, dict):
+        raise SystemExit(f"invalid config: {CONFIG_FILE}")
+    endpoint = str(cfg.get("endpoint") or "")
+    parsed = urllib.parse.urlparse(endpoint)
+    local_http = parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+    if parsed.scheme != "https" and not local_http:
+        raise SystemExit("sync endpoint must be https://, except localhost for development")
+    api_key = str(cfg.get("api_key") or "")
+    if not api_key or api_key == "REPLACE_ME":
+        raise SystemExit(f"missing api_key in {CONFIG_FILE}")
+    return {"endpoint": endpoint, "api_key": api_key}
 
 
 def _load_cursor() -> dict[str, Any]:
@@ -133,13 +145,16 @@ def collect_pending(sessions_file: Path, pushed: set[str]) -> list[dict[str, Any
         sid = rec.get("session_id")
         if not isinstance(sid, str):
             continue
+        safe_sid = strip_control(sid, max_len=128)
+        if not safe_sid:
+            continue
         try:
             end_at = float(rec.get("timestamp_unix") or 0)
         except (TypeError, ValueError):
             continue
         if not end_at:
             continue
-        if _event_key(sid, end_at) in pushed:
+        if _event_key(safe_sid, end_at) in pushed:
             continue
         try:
             duration = float(rec.get("duration_seconds") or 0)
@@ -148,8 +163,8 @@ def collect_pending(sessions_file: Path, pushed: set[str]) -> list[dict[str, Any
         start_at = end_at - duration
         pending.append(
             {
-                "session_id": sid,
-                "tracker_name": str(rec.get("project") or "unknown"),
+                "session_id": safe_sid,
+                "tracker_name": strip_control(str(rec.get("project") or "unknown"), max_len=64) or "unknown",
                 "start_at": start_at,
                 "end_at": end_at,
                 "duration_seconds": duration,

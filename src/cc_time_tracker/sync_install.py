@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import argparse
-import os
+import json
 import plistlib
 import subprocess
 import sys
 from pathlib import Path
 
 from .sync import CONFIG_FILE, TRACKING_DIR
+from .common import atomic_write_text, ensure_dir, harden_file_perms
 
 LABEL = "rocks.thatukrainianguy.cc-time-sync"
 PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
@@ -18,38 +19,34 @@ def _build_plist() -> dict:
     return {
         "Label": LABEL,
         "ProgramArguments": [
-            "/usr/bin/env",
-            "python3",
+            sys.executable,
             "-m",
             "cc_time_tracker.sync",
         ],
         "StartInterval": 900,  # 15 min
-        "StandardOutPath": "/tmp/cc-time-sync.log",
-        "StandardErrorPath": "/tmp/cc-time-sync.err",
+        "StandardOutPath": str(TRACKING_DIR / "cc-time-sync.log"),
+        "StandardErrorPath": str(TRACKING_DIR / "cc-time-sync.err"),
         "RunAtLoad": True,
-        "EnvironmentVariables": {
-            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        },
     }
 
 
 def install(endpoint: str | None) -> int:
     PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ensure_dir(TRACKING_DIR)
     with PLIST_PATH.open("wb") as f:
         plistlib.dump(_build_plist(), f)
     print(f"wrote {PLIST_PATH}")
 
-    TRACKING_DIR.mkdir(parents=True, exist_ok=True)
     if not CONFIG_FILE.exists():
         template = {
             "endpoint": endpoint or "https://projects.thatukrainianguy.rocks/api/sync",
             "api_key": "REPLACE_ME",
         }
-        import json
-        CONFIG_FILE.write_text(json.dumps(template, indent=2))
-        os.chmod(CONFIG_FILE, 0o600)
+        atomic_write_text(CONFIG_FILE, json.dumps(template, indent=2) + "\n")
+        harden_file_perms(CONFIG_FILE)
         print(f"wrote config template at {CONFIG_FILE} — fill in api_key before launchctl load")
     else:
+        harden_file_perms(CONFIG_FILE)
         print(f"config already exists at {CONFIG_FILE} — leaving as-is")
 
     rc = subprocess.run(
