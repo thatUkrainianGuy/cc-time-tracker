@@ -23,6 +23,7 @@ SESSIONS_FILE = TRACKING_DIR / "sessions.jsonl"
 ACTIVE_FILE = TRACKING_DIR / "active.jsonl"
 PROJECTS_META_FILE = TRACKING_DIR / "projects.json"
 LOCK_PATH = TRACKING_DIR / ".lock"
+SYNC_CURSOR_PATH = TRACKING_DIR / "sync-cursor.json"
 REFRESH_INTERVAL = 30  # seconds
 EVENT_END = "end"
 
@@ -266,23 +267,62 @@ def _rewrite_jsonl(path: Path, transform) -> int:
     return changed
 
 
+def _evict_session_ids_from_sync_cursor(cursor_path: Path, session_ids) -> int:
+    """Remove session_ids from the sync cursor so the next sync re-pushes them.
+    Caller must hold the tracking-dir lock. No-op if cursor missing/malformed.
+    Mirrors cc_time_tracker.sync.evict_session_ids_from_cursor — keep in sync
+    when changing the cursor schema.
+    """
+    ids = set(session_ids)
+    if not ids:
+        return 0
+    try:
+        raw = cursor_path.read_text()
+    except FileNotFoundError:
+        return 0
+    try:
+        cursor = json.loads(raw)
+    except json.JSONDecodeError:
+        return 0
+    pushed = cursor.get("pushed_session_ids") or []
+    if not isinstance(pushed, list):
+        return 0
+    kept = [s for s in pushed if isinstance(s, str) and s not in ids]
+    removed = len(pushed) - len(kept)
+    if removed == 0:
+        return 0
+    cursor["pushed_session_ids"] = sorted(kept)
+    _atomic_write_text(cursor_path, json.dumps(cursor))
+    return removed
+
+
 def merge_project_sessions(
     sessions_file: Path,
     source_project: str,
     target_project: str,
     lock_path: Path = LOCK_PATH,
+    sync_cursor_path: Path = SYNC_CURSOR_PATH,
 ) -> int:
     """Rewrite all sessions for source_project to target_project.
 
-    Returns number of records rewritten.
+    Returns number of records rewritten. Also evicts affected session_ids from
+    the sync cursor so the next sync re-pushes them under the new project name.
     """
+    affected_ids: list[str] = []
+
     def transform(record):
         if record.get("project") == source_project:
+            sid = record.get("session_id")
+            if isinstance(sid, str):
+                affected_ids.append(sid)
             return {**record, "project": target_project}
         return record
 
     with _acquire_lock(lock_path):
-        return _rewrite_jsonl(sessions_file, transform)
+        rewritten = _rewrite_jsonl(sessions_file, transform)
+        if affected_ids:
+            _evict_session_ids_from_sync_cursor(sync_cursor_path, affected_ids)
+        return rewritten
 
 
 def delete_project_sessions(
@@ -290,21 +330,31 @@ def delete_project_sessions(
     project: str,
     today_only: bool,
     lock_path: Path = LOCK_PATH,
+    sync_cursor_path: Path = SYNC_CURSOR_PATH,
 ) -> int:
     """Remove sessions for a project from the JSONL file.
 
-    Returns number of records removed.
+    Returns number of records removed. Also evicts the deleted session_ids
+    from the sync cursor to keep it tidy (the server still keeps a copy —
+    deletion does not propagate over the wire).
     """
     today_start = get_today_start_unix() if today_only else None
+    affected_ids: list[str] = []
 
     def transform(record):
         if record.get("project") == project:
             if not today_only or record.get("timestamp_unix", 0) >= today_start:
+                sid = record.get("session_id")
+                if isinstance(sid, str):
+                    affected_ids.append(sid)
                 return None
         return record
 
     with _acquire_lock(lock_path):
-        return _rewrite_jsonl(sessions_file, transform)
+        removed = _rewrite_jsonl(sessions_file, transform)
+        if affected_ids:
+            _evict_session_ids_from_sync_cursor(sync_cursor_path, affected_ids)
+        return removed
 
 
 def get_today_start_unix() -> float:

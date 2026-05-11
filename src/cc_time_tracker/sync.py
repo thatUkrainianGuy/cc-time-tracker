@@ -41,6 +41,38 @@ def _save_cursor(cursor: dict[str, Any]) -> None:
     harden_file_perms(CURSOR_FILE)
 
 
+def evict_session_ids_from_cursor(cursor_path: Path, session_ids: Iterable[str]) -> int:
+    """Remove the given session_ids from the sync cursor, returning the count
+    actually dropped. Used by merge/delete in report.py and the menubar so the
+    next sync re-pushes records whose project field changed locally after they
+    were originally synced. Caller must hold the tracking-dir lock. No-op if
+    the cursor file is missing or malformed.
+    """
+    ids = set(session_ids)
+    if not ids:
+        return 0
+    try:
+        raw = cursor_path.read_text()
+    except FileNotFoundError:
+        return 0
+    try:
+        cursor = json.loads(raw)
+    except json.JSONDecodeError:
+        return 0
+    pushed = cursor.get("pushed_session_ids") or []
+    if not isinstance(pushed, list):
+        return 0
+    kept = [s for s in pushed if isinstance(s, str) and s not in ids]
+    removed = len(pushed) - len(kept)
+    if removed == 0:
+        return 0
+    cursor["pushed_session_ids"] = sorted(kept)
+    ensure_dir(cursor_path.parent)
+    atomic_write_text(cursor_path, json.dumps(cursor))
+    harden_file_perms(cursor_path)
+    return removed
+
+
 def collect_pending(sessions_file: Path, pushed: set[str]) -> list[dict[str, Any]]:
     if not sessions_file.exists():
         return []

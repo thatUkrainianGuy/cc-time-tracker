@@ -1,6 +1,7 @@
 """Tests for cc_time_tracker.report — focused on sanitization behavior."""
 
 import io
+import json
 from contextlib import redirect_stdout
 
 from cc_time_tracker.report import (
@@ -87,3 +88,56 @@ def test_aggregate_by_day_tolerates_bad_timestamp():
     result = aggregate_by_day(sessions)
     # Bad ts coerces to 0 → falsy → record skipped. One day key remains.
     assert len(result) == 1
+
+
+def test_merge_evicts_affected_session_ids_from_sync_cursor(tmp_path, monkeypatch):
+    """Merging project records must remove their session_ids from the sync
+    cursor, so the next sync re-pushes them under the new project name."""
+    from cc_time_tracker import common, report, sync
+
+    sessions_file = tmp_path / "sessions.jsonl"
+    cursor_file = tmp_path / "sync-cursor.json"
+    lock_file = tmp_path / ".lock"
+    sessions_file.write_text(
+        json.dumps({"event": "end", "session_id": "s1", "project": "old",
+                    "duration_seconds": 100, "timestamp_unix": 1.0}) + "\n"
+        + json.dumps({"event": "end", "session_id": "s2", "project": "old",
+                      "duration_seconds": 200, "timestamp_unix": 2.0}) + "\n"
+        + json.dumps({"event": "end", "session_id": "s3", "project": "keepme",
+                      "duration_seconds": 50, "timestamp_unix": 3.0}) + "\n"
+    )
+    cursor_file.write_text(
+        json.dumps({"pushed_session_ids": ["s1", "s2", "s3"], "last_pushed_at_unix": 0})
+    )
+
+    monkeypatch.setattr(common, "SESSIONS_FILE", sessions_file)
+    monkeypatch.setattr(common, "LOCK_FILE", lock_file)
+    monkeypatch.setattr(report, "SESSIONS_FILE", sessions_file)
+    monkeypatch.setattr(sync, "CURSOR_FILE", cursor_file)
+
+    count = report.merge_project_sessions("old", "new")
+    assert count == 2
+
+    cur = json.loads(cursor_file.read_text())
+    assert sorted(cur["pushed_session_ids"]) == ["s3"]
+
+
+def test_merge_tolerates_absent_sync_cursor(tmp_path, monkeypatch):
+    """Merge must succeed even when no sync cursor exists yet."""
+    from cc_time_tracker import common, report, sync
+
+    sessions_file = tmp_path / "sessions.jsonl"
+    cursor_file = tmp_path / "sync-cursor.json"  # never created
+    lock_file = tmp_path / ".lock"
+    sessions_file.write_text(
+        json.dumps({"event": "end", "session_id": "s1", "project": "old",
+                    "duration_seconds": 100, "timestamp_unix": 1.0}) + "\n"
+    )
+
+    monkeypatch.setattr(common, "SESSIONS_FILE", sessions_file)
+    monkeypatch.setattr(common, "LOCK_FILE", lock_file)
+    monkeypatch.setattr(report, "SESSIONS_FILE", sessions_file)
+    monkeypatch.setattr(sync, "CURSOR_FILE", cursor_file)
+
+    assert report.merge_project_sessions("old", "new") == 1
+    assert not cursor_file.exists()

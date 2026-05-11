@@ -248,23 +248,33 @@ def print_orphans(records: list[dict], active: list[dict] | None = None):
 def merge_project_sessions(source: str, target: str) -> int:
     """Rewrite all sessions for source project to target project in sessions.jsonl.
 
-    Returns number of records rewritten.
+    Returns number of records rewritten. Also evicts the affected session_ids
+    from the sync cursor so the next sync re-pushes them under the new project
+    name (otherwise the server would keep them under the old name forever).
     """
+    from cc_time_tracker import sync  # local import to avoid cycle at module load
+
     with acquire_lock():
         records = load_jsonl(SESSIONS_FILE)
         if not records:
             return 0
 
         rewritten = 0
+        affected_ids: list[str] = []
         for record in records:
             if record.get("project") == source:
                 record["project"] = target
                 rewritten += 1
+                sid = record.get("session_id")
+                if isinstance(sid, str):
+                    affected_ids.append(sid)
 
         atomic_write_text(
             SESSIONS_FILE,
             "\n".join(json.dumps(r) for r in records) + "\n",
         )
+        if affected_ids:
+            sync.evict_session_ids_from_cursor(sync.CURSOR_FILE, affected_ids)
         return rewritten
 
 

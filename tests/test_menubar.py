@@ -345,6 +345,36 @@ class TestDeleteProjectSessions:
         assert raw_lines[0] == "not json at all"
         assert raw_lines[1] == "{broken json"
 
+    def test_delete_evicts_affected_ids_from_sync_cursor(self):
+        now = self._now_unix()
+        lines = [
+            make_end_record("s1", "proj-a", "/tmp/proj-a", now, 100),
+            make_end_record("s2", "proj-a", "/tmp/proj-a", now, 200),
+            make_end_record("s3", "proj-b", "/tmp/proj-b", now, 50),
+        ]
+        self.sessions_file.write_text("\n".join(lines) + "\n")
+        cursor = Path(self.tmpdir) / "sync-cursor.json"
+        cursor.write_text(json.dumps(
+            {"pushed_session_ids": ["s1", "s2", "s3"], "last_pushed_at_unix": 0}
+        ))
+        self.mod.delete_project_sessions(
+            self.sessions_file, "proj-a", today_only=False,
+            lock_path=self.lock_path, sync_cursor_path=cursor,
+        )
+        cur = json.loads(cursor.read_text())
+        assert sorted(cur["pushed_session_ids"]) == ["s3"]
+
+    def test_delete_tolerates_missing_sync_cursor(self):
+        now = self._now_unix()
+        lines = [make_end_record("s1", "proj-a", "/tmp/proj-a", now, 100)]
+        self.sessions_file.write_text("\n".join(lines) + "\n")
+        cursor = Path(self.tmpdir) / "sync-cursor.json"  # never created
+        self.mod.delete_project_sessions(
+            self.sessions_file, "proj-a", today_only=False,
+            lock_path=self.lock_path, sync_cursor_path=cursor,
+        )
+        assert not cursor.exists()
+
 
 class TestMergeProjectSessions:
     def setup_method(self):
@@ -439,6 +469,37 @@ class TestMergeProjectSessions:
         assert r["session_id"] == "s1"
         assert r["duration_seconds"] == 3600
         assert r["cwd"] == "/tmp/worker"
+
+    def test_merge_evicts_affected_ids_from_sync_cursor(self):
+        now = self._now_unix()
+        lines = [
+            make_end_record("s1", "worker", "/tmp/worker", now, 100),
+            make_end_record("s2", "worker", "/tmp/worker", now, 200),
+            make_end_record("s3", "keepme", "/tmp/keepme", now, 50),
+        ]
+        self.sessions_file.write_text("\n".join(lines) + "\n")
+        cursor = Path(self.tmpdir) / "sync-cursor.json"
+        cursor.write_text(json.dumps(
+            {"pushed_session_ids": ["s1", "s2", "s3"], "last_pushed_at_unix": 0}
+        ))
+        self.mod.merge_project_sessions(
+            self.sessions_file, "worker", "target",
+            lock_path=self.lock_path, sync_cursor_path=cursor,
+        )
+        cur = json.loads(cursor.read_text())
+        assert sorted(cur["pushed_session_ids"]) == ["s3"]
+
+    def test_merge_tolerates_missing_sync_cursor(self):
+        now = self._now_unix()
+        lines = [make_end_record("s1", "worker", "/tmp/worker", now, 100)]
+        self.sessions_file.write_text("\n".join(lines) + "\n")
+        cursor = Path(self.tmpdir) / "sync-cursor.json"  # never created
+        # Must not raise.
+        self.mod.merge_project_sessions(
+            self.sessions_file, "worker", "target",
+            lock_path=self.lock_path, sync_cursor_path=cursor,
+        )
+        assert not cursor.exists()
 
 
 class TestProjectsMeta:

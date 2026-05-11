@@ -126,3 +126,49 @@ def test_5xx_keeps_cursor_unchanged(workdir):
         rc = sync.run_once(dry_run=False)
     assert rc != 0
     assert not (workdir / "sync-cursor.json").exists()
+
+
+# ── evict_session_ids_from_cursor ──────────────────────────────────────────
+
+
+def test_evict_removes_given_ids(workdir):
+    cursor = workdir / "sync-cursor.json"
+    cursor.write_text(
+        json.dumps({"pushed_session_ids": ["a", "b", "c"], "last_pushed_at_unix": 0})
+    )
+    removed = sync.evict_session_ids_from_cursor(cursor, ["a", "c"])
+    assert removed == 2
+    cur = json.loads(cursor.read_text())
+    assert cur["pushed_session_ids"] == ["b"]
+
+
+def test_evict_returns_zero_when_no_ids_match(workdir):
+    cursor = workdir / "sync-cursor.json"
+    cursor.write_text(json.dumps({"pushed_session_ids": ["a", "b"]}))
+    removed = sync.evict_session_ids_from_cursor(cursor, ["x", "y"])
+    assert removed == 0
+    cur = json.loads(cursor.read_text())
+    assert sorted(cur["pushed_session_ids"]) == ["a", "b"]
+
+
+def test_evict_tolerates_missing_cursor(tmp_path):
+    cursor = tmp_path / "nope.json"
+    removed = sync.evict_session_ids_from_cursor(cursor, ["a"])
+    assert removed == 0
+    assert not cursor.exists()
+
+
+def test_evict_tolerates_malformed_cursor(tmp_path):
+    cursor = tmp_path / "sync-cursor.json"
+    cursor.write_text("not json at all")
+    removed = sync.evict_session_ids_from_cursor(cursor, ["a"])
+    assert removed == 0
+
+
+def test_evict_empty_ids_is_noop(workdir):
+    cursor = workdir / "sync-cursor.json"
+    cursor.write_text(json.dumps({"pushed_session_ids": ["a"]}))
+    removed = sync.evict_session_ids_from_cursor(cursor, [])
+    assert removed == 0
+    cur = json.loads(cursor.read_text())
+    assert cur["pushed_session_ids"] == ["a"]
