@@ -107,7 +107,7 @@ def test_merge_evicts_affected_session_ids_from_sync_cursor(tmp_path, monkeypatc
                       "duration_seconds": 50, "timestamp_unix": 3.0}) + "\n"
     )
     cursor_file.write_text(
-        json.dumps({"pushed_session_ids": ["s1", "s2", "s3"], "last_pushed_at_unix": 0})
+        json.dumps({"pushed_events": ["s1|1.0", "s2|2.0", "s3|3.0"]})
     )
 
     monkeypatch.setattr(common, "SESSIONS_FILE", sessions_file)
@@ -119,7 +119,7 @@ def test_merge_evicts_affected_session_ids_from_sync_cursor(tmp_path, monkeypatc
     assert count == 2
 
     cur = json.loads(cursor_file.read_text())
-    assert sorted(cur["pushed_session_ids"]) == ["s3"]
+    assert cur["pushed_events"] == ["s3|3.0"]
 
 
 def test_merge_tolerates_absent_sync_cursor(tmp_path, monkeypatch):

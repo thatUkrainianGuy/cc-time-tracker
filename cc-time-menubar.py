@@ -268,10 +268,15 @@ def _rewrite_jsonl(path: Path, transform) -> int:
 
 
 def _evict_session_ids_from_sync_cursor(cursor_path: Path, session_ids) -> int:
-    """Remove session_ids from the sync cursor so the next sync re-pushes them.
-    Caller must hold the tracking-dir lock. No-op if cursor missing/malformed.
-    Mirrors cc_time_tracker.sync.evict_session_ids_from_cursor — keep in sync
-    when changing the cursor schema.
+    """Remove every cursor entry whose session_id is in `session_ids`. The
+    cursor file stores entries as "session_id|end_at" so a single session_id
+    can have multiple entries (one per end event); a local merge changes the
+    project field on all of them, so they must all be evicted together.
+    Caller must hold the tracking-dir lock. No-op on missing/malformed
+    cursor. A legacy cursor (pushed_session_ids field) is wiped entirely,
+    forcing the next sync to reconcile. Mirrors
+    cc_time_tracker.sync.evict_session_ids_from_cursor — keep in sync when
+    changing the cursor schema.
     """
     ids = set(session_ids)
     if not ids:
@@ -284,14 +289,29 @@ def _evict_session_ids_from_sync_cursor(cursor_path: Path, session_ids) -> int:
         cursor = json.loads(raw)
     except json.JSONDecodeError:
         return 0
-    pushed = cursor.get("pushed_session_ids") or []
+    if not isinstance(cursor, dict):
+        return 0
+    if "pushed_events" not in cursor and "pushed_session_ids" in cursor:
+        new_cursor = {k: v for k, v in cursor.items() if k != "pushed_session_ids"}
+        new_cursor["pushed_events"] = []
+        _atomic_write_text(cursor_path, json.dumps(new_cursor))
+        return 0
+    pushed = cursor.get("pushed_events") or []
     if not isinstance(pushed, list):
         return 0
-    kept = [s for s in pushed if isinstance(s, str) and s not in ids]
-    removed = len(pushed) - len(kept)
+    kept: list = []
+    removed = 0
+    for entry in pushed:
+        if not isinstance(entry, str):
+            continue
+        sid_part = entry.split("|", 1)[0]
+        if sid_part in ids:
+            removed += 1
+        else:
+            kept.append(entry)
     if removed == 0:
         return 0
-    cursor["pushed_session_ids"] = sorted(kept)
+    cursor["pushed_events"] = sorted(kept)
     _atomic_write_text(cursor_path, json.dumps(cursor))
     return removed
 

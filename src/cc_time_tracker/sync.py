@@ -19,6 +19,18 @@ CONFIG_FILE = TRACKING_DIR / "sync-config.json"
 
 BATCH_SIZE = 100
 
+# The cursor tracks every end event the client has already pushed. Each entry
+# is f"{session_id}|{end_at}" — Claude Code's session_id is not unique on its
+# own because /clear and prompt-exit both fire SessionEnd, so the same
+# session_id can produce multiple end events that we must each push as a
+# separate row server-side.
+_CURSOR_KEY = "pushed_events"
+_LEGACY_CURSOR_KEY = "pushed_session_ids"
+
+
+def _event_key(session_id: str, end_at: float) -> str:
+    return f"{session_id}|{end_at}"
+
 
 def _load_config() -> dict[str, str]:
     if not CONFIG_FILE.exists():
@@ -27,27 +39,41 @@ def _load_config() -> dict[str, str]:
 
 
 def _load_cursor() -> dict[str, Any]:
+    """Read the cursor file. A legacy cursor with only `pushed_session_ids`
+    cannot be translated to the new event-key format (we don't know which
+    end_at value each pre-migration push had), so we discard it and let the
+    next sync re-push everything. The server is idempotent on
+    (session_id, end_at) so re-push is safe."""
     if not CURSOR_FILE.exists():
-        return {"pushed_session_ids": [], "last_pushed_at_unix": 0}
+        return {_CURSOR_KEY: []}
     try:
-        return json.loads(CURSOR_FILE.read_text())
+        cursor = json.loads(CURSOR_FILE.read_text())
     except Exception:
-        return {"pushed_session_ids": [], "last_pushed_at_unix": 0}
+        return {_CURSOR_KEY: []}
+    if not isinstance(cursor, dict):
+        return {_CURSOR_KEY: []}
+    if _CURSOR_KEY not in cursor and _LEGACY_CURSOR_KEY in cursor:
+        # Legacy cursor — drop the old field, start with an empty event list.
+        cursor = {_CURSOR_KEY: []}
+    cursor.setdefault(_CURSOR_KEY, [])
+    return cursor
 
 
 def _save_cursor(cursor: dict[str, Any]) -> None:
     ensure_dir(TRACKING_DIR)
+    cursor.pop(_LEGACY_CURSOR_KEY, None)
     atomic_write_text(CURSOR_FILE, json.dumps(cursor))
     harden_file_perms(CURSOR_FILE)
 
 
 def evict_session_ids_from_cursor(cursor_path: Path, session_ids: Iterable[str]) -> int:
-    """Remove the given session_ids from the sync cursor, returning the count
-    actually dropped. Used by merge/delete in report.py and the menubar so the
-    next sync re-pushes records whose project field changed locally after they
-    were originally synced. Caller must hold the tracking-dir lock. No-op if
-    the cursor file is missing or malformed.
-    """
+    """Remove every cursor entry whose session_id is in `session_ids`,
+    returning the count actually dropped. Used by merge/delete so the next
+    sync re-pushes the affected records. A local merge changes the project
+    field on every end event for a session_id, so all those event keys must
+    be evicted together. Caller must hold the tracking-dir lock. No-op if
+    the cursor file is missing, malformed, or uses the legacy format
+    (which is also wiped, forcing the next sync to reconcile)."""
     ids = set(session_ids)
     if not ids:
         return 0
@@ -59,14 +85,33 @@ def evict_session_ids_from_cursor(cursor_path: Path, session_ids: Iterable[str])
         cursor = json.loads(raw)
     except json.JSONDecodeError:
         return 0
-    pushed = cursor.get("pushed_session_ids") or []
+    if not isinstance(cursor, dict):
+        return 0
+    if _CURSOR_KEY not in cursor and _LEGACY_CURSOR_KEY in cursor:
+        # Wipe the legacy cursor entirely — we can't selectively evict because
+        # the old format lacks end_at; next sync re-pushes everything.
+        new_cursor = {k: v for k, v in cursor.items() if k != _LEGACY_CURSOR_KEY}
+        new_cursor[_CURSOR_KEY] = []
+        ensure_dir(cursor_path.parent)
+        atomic_write_text(cursor_path, json.dumps(new_cursor))
+        harden_file_perms(cursor_path)
+        return 0
+    pushed = cursor.get(_CURSOR_KEY) or []
     if not isinstance(pushed, list):
         return 0
-    kept = [s for s in pushed if isinstance(s, str) and s not in ids]
-    removed = len(pushed) - len(kept)
+    kept: list[str] = []
+    removed = 0
+    for entry in pushed:
+        if not isinstance(entry, str):
+            continue
+        sid_part = entry.split("|", 1)[0]
+        if sid_part in ids:
+            removed += 1
+        else:
+            kept.append(entry)
     if removed == 0:
         return 0
-    cursor["pushed_session_ids"] = sorted(kept)
+    cursor[_CURSOR_KEY] = sorted(kept)
     ensure_dir(cursor_path.parent)
     atomic_write_text(cursor_path, json.dumps(cursor))
     harden_file_perms(cursor_path)
@@ -74,22 +119,32 @@ def evict_session_ids_from_cursor(cursor_path: Path, session_ids: Iterable[str])
 
 
 def collect_pending(sessions_file: Path, pushed: set[str]) -> list[dict[str, Any]]:
+    """Emit one pending dict per end event not yet in the cursor. Distinct
+    end events for the same session_id (e.g. two /clear ends) produce
+    separate pending dicts because server identity is (session_id, end_at)."""
     if not sessions_file.exists():
         return []
     pending: list[dict[str, Any]] = []
-    seen_for_id: dict[str, dict[str, Any]] = {}
     for rec in load_jsonl(sessions_file):
         if not isinstance(rec, dict):
+            continue
+        if rec.get("event") != "end":
             continue
         sid = rec.get("session_id")
         if not isinstance(sid, str):
             continue
-        if rec.get("event") == "end" and sid not in pushed:
-            seen_for_id[sid] = rec
-    for sid, rec in seen_for_id.items():
-        # Find matching start to get start_at; fall back to end timestamp - duration
-        end_at = float(rec.get("timestamp_unix") or 0)
-        duration = float(rec.get("duration_seconds") or 0)
+        try:
+            end_at = float(rec.get("timestamp_unix") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not end_at:
+            continue
+        if _event_key(sid, end_at) in pushed:
+            continue
+        try:
+            duration = float(rec.get("duration_seconds") or 0)
+        except (TypeError, ValueError):
+            duration = 0.0
         start_at = end_at - duration
         pending.append(
             {
@@ -111,7 +166,7 @@ def _http_post(url: str, data: bytes, headers: dict[str, str], timeout: float = 
 def run_once(dry_run: bool = False) -> int:
     cfg = _load_config()
     cursor = _load_cursor()
-    pushed: set[str] = set(cursor.get("pushed_session_ids") or [])
+    pushed: set[str] = set(cursor.get(_CURSOR_KEY) or [])
     pending = collect_pending(SESSIONS_FILE, pushed)
     if not pending:
         print("nothing to sync")
@@ -153,8 +208,8 @@ def run_once(dry_run: bool = False) -> int:
             print(f"client error {status}", file=sys.stderr)
             return 2
         for rec in batch:
-            pushed.add(rec["session_id"])
-        cursor["pushed_session_ids"] = sorted(pushed)
+            pushed.add(_event_key(rec["session_id"], rec["end_at"]))
+        cursor[_CURSOR_KEY] = sorted(pushed)
         _save_cursor(cursor)
         print(f"pushed {len(batch)}")
     return 0
@@ -163,7 +218,7 @@ def run_once(dry_run: bool = False) -> int:
 def main() -> int:
     p = argparse.ArgumentParser(prog="cc-time-sync")
     p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--reset", action="store_true", help="forget cursor, resend all (server is idempotent)")
+    p.add_argument("--reset", action="store_true", help="forget cursor, resend all (server dedupes by (session_id, end_at))")
     args = p.parse_args()
     if args.reset and CURSOR_FILE.exists():
         CURSOR_FILE.unlink()
