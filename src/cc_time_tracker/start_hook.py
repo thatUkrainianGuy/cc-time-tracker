@@ -87,6 +87,16 @@ def main():
     with acquire_lock(timeout=HOOK_LOCK_TIMEOUT_SECONDS):
         kept, orphan_ends = _cleanup_orphans(now_ts)
 
+        # Claude Code re-fires SessionStart for the same running session on
+        # compact/clear (same session_id, same live process), so its start
+        # record survives orphan-cleanup and is already in `kept`. Recording a
+        # second start would orphan in active.jsonl and later be billed as
+        # phantom time. If this session is already tracked, add nothing new.
+        duplicate = any(
+            rec.get("session_id") == session_id and rec.get("event") == EVENT_START
+            for rec in kept
+        )
+
         sessions_existed = SESSIONS_FILE.exists()
         active_existed = ACTIVE_FILE.exists()
 
@@ -97,13 +107,15 @@ def main():
             with open(ACTIVE_FILE, "w") as f:
                 for rec in kept:
                     f.write(json.dumps(rec) + "\n")
-                f.write(json.dumps(record) + "\n")
-        else:
+                if not duplicate:
+                    f.write(json.dumps(record) + "\n")
+        elif not duplicate:
             with open(ACTIVE_FILE, "a") as f:
                 f.write(json.dumps(record) + "\n")
 
-        with open(SESSIONS_FILE, "a") as f:
-            f.write(json.dumps(record) + "\n")
+        if not duplicate:
+            with open(SESSIONS_FILE, "a") as f:
+                f.write(json.dumps(record) + "\n")
 
         # New files inherit the umask-derived mode; tighten on creation so
         # other local users can't read project paths or session IDs.

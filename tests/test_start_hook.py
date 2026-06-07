@@ -162,6 +162,56 @@ def test_start_hook_cleans_dead_pid(tmp_path):
     assert "new-1" in active_ids
 
 
+def test_start_hook_dedupes_active_session(tmp_path):
+    """A compact/clear SessionStart for an already-active session must NOT add a
+    second active record (which would later be billed as phantom time)."""
+    sessions = tmp_path / "sessions.jsonl"
+    active = tmp_path / "active.jsonl"
+
+    import time
+    now_ts = time.time()
+
+    # Existing live session (pid 1 = init, always alive → survives cleanup).
+    existing = json.dumps({
+        "event": "start", "session_id": "live-1",
+        "cwd": "/home/user/proj", "project": "proj",
+        "timestamp_unix": now_ts - 1800, "pid": 1,
+    })
+    active.write_text(existing + "\n")
+    sessions.write_text(existing + "\n")
+
+    # Same session_id fires SessionStart again (auto-compact).
+    input_data = json.dumps({
+        "session_id": "live-1",
+        "cwd": "/home/user/proj",
+        "source": "compact",
+    })
+
+    with (
+        patch("cc_time_tracker.common.TRACKING_DIR", tmp_path),
+        patch("cc_time_tracker.common.SESSIONS_FILE", sessions),
+        patch("cc_time_tracker.common.ACTIVE_FILE", active),
+        patch("cc_time_tracker.common.LOCK_FILE", tmp_path / ".lock"),
+        patch("cc_time_tracker.start_hook.SESSIONS_FILE", sessions),
+        patch("cc_time_tracker.start_hook.ACTIVE_FILE", active),
+        patch("sys.stdin", StringIO(input_data)),
+    ):
+        try:
+            main()
+        except SystemExit as e:
+            assert e.code == 0
+
+    # active.jsonl still holds exactly one start for live-1, the original.
+    active_records = [json.loads(l) for l in active.read_text().strip().split("\n")]
+    assert len(active_records) == 1
+    assert active_records[0]["session_id"] == "live-1"
+    assert active_records[0]["timestamp_unix"] == now_ts - 1800
+
+    # No duplicate start appended to sessions.jsonl either.
+    sess_records = [json.loads(l) for l in sessions.read_text().strip().split("\n")]
+    assert len(sess_records) == 1
+
+
 def test_start_hook_records_pid(tmp_path):
     """New start records should include the parent process's pid."""
     sessions = tmp_path / "sessions.jsonl"

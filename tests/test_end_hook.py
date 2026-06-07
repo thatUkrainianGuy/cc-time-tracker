@@ -55,6 +55,58 @@ def test_end_hook_calculates_duration(tmp_path):
     assert active.read_text().strip() == ""
 
 
+def test_end_hook_removes_all_duplicate_starts(tmp_path):
+    """Multiple start records for one session_id (from compacts) must all be
+    removed on end, with duration measured from the earliest start."""
+    sessions = tmp_path / "sessions.jsonl"
+    active = tmp_path / "active.jsonl"
+
+    now = time.time()
+    starts = [
+        json.dumps({
+            "event": "start", "session_id": "dup-1",
+            "cwd": "/home/user/proj", "project": "proj",
+            "source": src, "timestamp_unix": now - age,
+        })
+        for src, age in (("startup", 600), ("compact", 400), ("compact", 120))
+    ]
+    other = json.dumps({
+        "event": "start", "session_id": "other-1",
+        "cwd": "/home/user/x", "project": "x", "timestamp_unix": now - 50,
+    })
+    active.write_text("\n".join(starts + [other]) + "\n")
+
+    input_data = json.dumps({
+        "session_id": "dup-1",
+        "cwd": "/home/user/proj",
+        "reason": "user_exit",
+    })
+
+    with (
+        patch("cc_time_tracker.common.SESSIONS_FILE", sessions),
+        patch("cc_time_tracker.common.ACTIVE_FILE", active),
+        patch("cc_time_tracker.common.LOCK_FILE", tmp_path / ".lock"),
+        patch("cc_time_tracker.end_hook.SESSIONS_FILE", sessions),
+        patch("cc_time_tracker.end_hook.ACTIVE_FILE", active),
+        patch("sys.stdin", StringIO(input_data)),
+    ):
+        try:
+            main()
+        except SystemExit as e:
+            assert e.code == 0
+
+    # Exactly one end record, billed from the earliest start (~600s ago).
+    end_records = [json.loads(l) for l in sessions.read_text().strip().split("\n")]
+    assert len(end_records) == 1
+    assert end_records[0]["event"] == "end"
+    assert end_records[0]["duration_seconds"] > 550
+
+    # All dup-1 starts gone; the unrelated session survives.
+    active_ids = [json.loads(l)["session_id"] for l in active.read_text().strip().split("\n")]
+    assert "dup-1" not in active_ids
+    assert active_ids == ["other-1"]
+
+
 def test_end_hook_no_matching_start(tmp_path):
     """End hook should still write record even without a matching start."""
     sessions = tmp_path / "sessions.jsonl"

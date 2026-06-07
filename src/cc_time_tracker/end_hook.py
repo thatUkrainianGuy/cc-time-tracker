@@ -15,19 +15,32 @@ HOOK_LOCK_TIMEOUT_SECONDS = 2
 
 
 def find_and_remove_active(active_file, session_id: str) -> tuple[dict | None, list[dict]]:
-    """Return (matching start record or None, remaining active records)."""
-    match: dict | None = None
+    """Return (earliest matching start record or None, remaining active records).
+
+    Removes ALL start records for this session_id, not just the first. Claude
+    Code re-fires SessionStart for one running session (compact/clear/resume
+    reuse the same session_id), so duplicate start records can pile up in
+    active.jsonl. If any were left behind they'd later be billed from their old
+    start time by start_hook's orphan-cleanup, inflating totals by hours. The
+    real session began at the earliest start, so duration is measured from that.
+    """
+    matches: list[dict] = []
     remaining: list[dict] = []
     for record in load_jsonl(active_file):
         if (
-            match is None
-            and record.get("session_id") == session_id
+            record.get("session_id") == session_id
             and record.get("event") == EVENT_START
         ):
-            match = record
+            matches.append(record)
         else:
             remaining.append(record)
-    return match, remaining
+    if not matches:
+        return None, remaining
+    earliest = min(
+        matches,
+        key=lambda r: coerce_float(r.get("timestamp_unix"), default=float("inf")),
+    )
+    return earliest, remaining
 
 
 def main():
