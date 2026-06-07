@@ -61,12 +61,6 @@ def format_duration_hours(seconds: float) -> str:
     return f"{hours:.2f}h"
 
 
-def filter_by_time(sessions: list[dict], after: datetime) -> list[dict]:
-    """Filter sessions to those ending after a given datetime."""
-    after_ts = after.timestamp()
-    return [s for s in sessions if s.get("timestamp_unix", 0) >= after_ts]
-
-
 def get_start_of_today() -> datetime:
     now = datetime.now(timezone.utc)
     return now.replace(hour=0, minute=0, second=0, microsecond=0)

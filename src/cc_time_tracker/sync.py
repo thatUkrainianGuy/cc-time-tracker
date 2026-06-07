@@ -99,14 +99,17 @@ def evict_session_ids_from_cursor(cursor_path: Path, session_ids: Iterable[str])
         return 0
     if not isinstance(cursor, dict):
         return 0
+    def _save(new_cursor: dict) -> None:
+        ensure_dir(cursor_path.parent)
+        atomic_write_text(cursor_path, json.dumps(new_cursor))
+        harden_file_perms(cursor_path)
+
     if _CURSOR_KEY not in cursor and _LEGACY_CURSOR_KEY in cursor:
         # Wipe the legacy cursor entirely — we can't selectively evict because
         # the old format lacks end_at; next sync re-pushes everything.
         new_cursor = {k: v for k, v in cursor.items() if k != _LEGACY_CURSOR_KEY}
         new_cursor[_CURSOR_KEY] = []
-        ensure_dir(cursor_path.parent)
-        atomic_write_text(cursor_path, json.dumps(new_cursor))
-        harden_file_perms(cursor_path)
+        _save(new_cursor)
         return 0
     pushed = cursor.get(_CURSOR_KEY) or []
     if not isinstance(pushed, list):
@@ -124,9 +127,7 @@ def evict_session_ids_from_cursor(cursor_path: Path, session_ids: Iterable[str])
     if removed == 0:
         return 0
     cursor[_CURSOR_KEY] = sorted(kept)
-    ensure_dir(cursor_path.parent)
-    atomic_write_text(cursor_path, json.dumps(cursor))
-    harden_file_perms(cursor_path)
+    _save(cursor)
     return removed
 
 

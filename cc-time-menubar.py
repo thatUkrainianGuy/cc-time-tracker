@@ -54,9 +54,16 @@ def _md_safe(value) -> str:
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
-    """Write content via temp file + os.replace (POSIX-atomic)."""
+    """Write content via temp file + os.replace (POSIX-atomic).
+
+    The temp file is created 0600 before any bytes are written, so files
+    written through this helper land owner-only — matching the data-file
+    permission invariant in cc_time_tracker.common.atomic_write_text.
+    """
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(content)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(content)
     os.replace(tmp, path)
 
 
@@ -173,6 +180,11 @@ def _aggregate_sessions_by_date(project: str, sessions: list[dict]) -> list[tupl
     )
 
 
+def _row_totals(rows: list[tuple[str, int, float]]) -> tuple[int, float]:
+    """Sum session counts and seconds across aggregated day rows."""
+    return sum(c for _, c, _ in rows), sum(s for _, _, s in rows)
+
+
 def generate_csv_report(project: str, sessions: list[dict]) -> str:
     """Generate a CSV report for a project.
 
@@ -185,12 +197,9 @@ def generate_csv_report(project: str, sessions: list[dict]) -> str:
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
     writer.writerow(["Date", "Project", "Sessions", "Duration", "Hours"])
-    total_sessions = 0
-    total_seconds = 0.0
     for day, count, secs in rows:
-        total_sessions += count
-        total_seconds += secs
         writer.writerow([day, safe_project, count, format_duration(secs), f"{secs / 3600:.2f}"])
+    total_sessions, total_seconds = _row_totals(rows)
     writer.writerow(["Total", "", total_sessions, format_duration(total_seconds), f"{total_seconds / 3600:.2f}"])
     return buf.getvalue()
 
@@ -213,12 +222,9 @@ def generate_md_report(project: str, sessions: list[dict]) -> str:
         "| Date | Sessions | Duration | Hours |",
         "|------|----------|----------|-------|",
     ]
-    total_sessions = 0
-    total_seconds = 0.0
     for day, count, secs in rows:
-        total_sessions += count
-        total_seconds += secs
         lines.append(f"| {day} | {count} | {format_duration(secs)} | {secs / 3600:.2f} |")
+    total_sessions, total_seconds = _row_totals(rows)
     lines.append(
         f"| **Total** | **{total_sessions}** | **{format_duration(total_seconds)}** | **{total_seconds / 3600:.2f}** |"
     )
