@@ -15,6 +15,8 @@ import io
 import json
 import os
 import re
+import signal
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -112,6 +114,25 @@ def _coerce_float(value, default: float = 0.0) -> float:
     if isinstance(value, str):
         try:
             return float(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _coerce_int(value, default=None):
+    """Best-effort int coercion — returns ``default`` on bad input.
+
+    Mirrors cc_time_tracker.common.coerce_int (see standalone note above).
+    """
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value == value and abs(value) < float("inf") else default
+    if isinstance(value, str):
+        try:
+            return int(value)
         except ValueError:
             return default
     return default
@@ -412,6 +433,87 @@ def load_active_sessions(active_file: Path) -> list[dict]:
     return _read_jsonl(active_file)
 
 
+def _pid_alive(pid: int) -> bool:
+    """Mirrors cc_time_tracker.start_hook._pid_alive."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _process_cwd(pid: int):
+    """Return the process's current working directory via lsof, or None.
+
+    None means "could not determine" (lsof missing, failed, or no cwd row) —
+    callers must treat that as verification failure, never as a pass.
+    Absolute lsof path so a hostile PATH can't substitute the binary.
+    """
+    try:
+        out = subprocess.run(
+            ["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        if line.startswith("n"):
+            return line[1:]
+    return None
+
+
+def find_active_record_process(record: dict):
+    """Validate that an active record's pid still belongs to its session.
+
+    Returns (pid, None) when the process is safe to signal, else
+    (None, reason). Guards against pid reuse: the live process must still
+    have the cwd the session started in, otherwise refuse to touch it.
+    pid <= 0 is rejected outright — os.kill(0)/os.kill(-n) signal whole
+    process groups, not a single process.
+    """
+    pid = _coerce_int(record.get("pid"))
+    if pid is None or pid <= 0:
+        return None, "No pid recorded for this session."
+    if not _pid_alive(pid):
+        return None, (
+            "Process is not running — the timer is an orphan and will be "
+            "cleaned up on the next session start."
+        )
+    proc_cwd = _process_cwd(pid)
+    if proc_cwd is None:
+        return None, f"Could not verify what pid {pid} is — not touching it."
+    rec_cwd = record.get("cwd")
+    if not isinstance(rec_cwd, str) or not rec_cwd:
+        return None, "Session record has no cwd to verify the process against."
+    if os.path.realpath(proc_cwd) != os.path.realpath(rec_cwd):
+        return None, (
+            f"pid {pid} no longer matches this session (its working directory "
+            f"changed) — the pid may have been reused. Not touching it."
+        )
+    return pid, None
+
+
+def stop_session_process(record: dict, kill_func=os.kill):
+    """SIGTERM the Claude process behind an active session record.
+
+    Returns (ok, message). Always SIGTERM, never SIGKILL — a graceful
+    shutdown fires the SessionEnd hook, which writes the end record and
+    closes the timer; a hard kill would leave an orphan in active.jsonl.
+    """
+    pid, err = find_active_record_process(record)
+    if pid is None:
+        return False, err
+    try:
+        kill_func(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return False, "Process already exited."
+    except OSError as e:
+        return False, f"Could not signal pid {pid}: {e}"
+    return True, f"Sent SIGTERM to pid {pid} — the timer closes when the session ends."
+
+
 def build_project_data(
     today_sessions: list[dict],
     all_sessions: list[dict],
@@ -548,6 +650,10 @@ def main():
 
                 item = rumps.MenuItem(label, callback=lambda _: None) if is_active else rumps.MenuItem(label)
                 self._add_export_items(item, name)
+                if is_active:
+                    for rec in active:
+                        if rec.get("project", "unknown") == name:
+                            item.add(self._make_stop_item(rec))
                 if not is_active:
                     merge_menu = rumps.MenuItem("Merge into...")
                     for target in all_project_names:
@@ -602,9 +708,9 @@ def main():
             self.menu.add(rumps.separator)
             self.menu.add(rumps.MenuItem("Quit", callback=self.quit_app))
 
-        def _schedule_refresh(self):
+        def _schedule_refresh(self, delay=0.1):
             """Defer refresh to next run loop iteration to avoid mutating menu mid-callback."""
-            t = rumps.Timer(self._deferred_refresh, 0.1)
+            t = rumps.Timer(self._deferred_refresh, delay)
             t.start()
 
         def _deferred_refresh(self, timer):
@@ -626,6 +732,35 @@ def main():
             if response == 1:
                 delete_project_sessions(SESSIONS_FILE, project, today_only=today_only)
                 self._schedule_refresh()
+
+        def _make_stop_item(self, record):
+            pid = _coerce_int(record.get("pid"))
+            start_ts = _coerce_float(record.get("timestamp_unix"))
+            since = datetime.fromtimestamp(start_ts).strftime("%H:%M") if start_ts else "?"
+            label = f"Stop session (pid {pid if pid is not None else '?'}, since {since})"
+            return rumps.MenuItem(label, callback=lambda _, r=record: self._stop_session(r))
+
+        def _stop_session(self, record):
+            self._bring_to_front()
+            project = _strip_control(record.get("project", "unknown"))
+            pid, err = find_active_record_process(record)
+            if pid is None:
+                rumps.alert(title="Cannot Stop Session", message=err)
+                self._schedule_refresh()
+                return
+            response = rumps.alert(
+                title="Confirm Stop",
+                message=f"Stop the Claude Code session for '{project}' (pid {pid})?\n"
+                        f"It gets a graceful shutdown so its time is recorded.",
+                ok="Stop",
+                cancel="Cancel",
+            )
+            if response == 1:
+                ok, msg = stop_session_process(record)
+                if not ok:
+                    rumps.alert(title="Stop Failed", message=msg)
+                # End hook needs a moment to write the end record after SIGTERM.
+                self._schedule_refresh(delay=2.0)
 
         def _add_export_items(self, menu_item, project_name):
             menu_item.add(rumps.MenuItem(

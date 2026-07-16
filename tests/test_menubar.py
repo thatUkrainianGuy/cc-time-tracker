@@ -691,3 +691,96 @@ class TestPoisonedRecords:
         )
         result = self.mod._read_jsonl(self.sessions_file)
         assert result == [{"a": 1}, {"b": 2}]
+
+
+class TestStopSessionProcess:
+    """Pid verification and SIGTERM delivery for the Stop session action."""
+
+    def setup_method(self):
+        self.mod = load_menubar()
+        self.killed = []
+
+    def _kill(self, pid, sig):
+        self.killed.append((pid, sig))
+
+    def _record(self, **overrides):
+        rec = {"pid": 12345, "cwd": "/tmp/proj", "project": "proj"}
+        rec.update(overrides)
+        return rec
+
+    def test_happy_path_sends_sigterm(self):
+        import signal
+        self.mod._pid_alive = lambda pid: True
+        self.mod._process_cwd = lambda pid: "/tmp/proj"
+        ok, msg = self.mod.stop_session_process(self._record(), kill_func=self._kill)
+        assert ok
+        assert self.killed == [(12345, signal.SIGTERM)]
+
+    def test_missing_pid_refuses(self):
+        ok, msg = self.mod.stop_session_process(self._record(pid=None), kill_func=self._kill)
+        assert not ok
+        assert self.killed == []
+
+    def test_non_numeric_pid_refuses(self):
+        ok, _ = self.mod.stop_session_process(self._record(pid="abc"), kill_func=self._kill)
+        assert not ok
+        assert self.killed == []
+
+    def test_nonpositive_pid_refuses(self):
+        """os.kill(0)/os.kill(-n) signal whole process groups — must be rejected."""
+        for bad in (0, -1, -12345):
+            ok, _ = self.mod.stop_session_process(self._record(pid=bad), kill_func=self._kill)
+            assert not ok
+        assert self.killed == []
+
+    def test_dead_pid_reports_orphan(self):
+        self.mod._pid_alive = lambda pid: False
+        ok, msg = self.mod.stop_session_process(self._record(), kill_func=self._kill)
+        assert not ok
+        assert "orphan" in msg
+        assert self.killed == []
+
+    def test_cwd_mismatch_refuses(self):
+        """A recycled pid with a different cwd must never be signalled."""
+        self.mod._pid_alive = lambda pid: True
+        self.mod._process_cwd = lambda pid: "/somewhere/else"
+        ok, msg = self.mod.stop_session_process(self._record(), kill_func=self._kill)
+        assert not ok
+        assert self.killed == []
+
+    def test_unverifiable_cwd_refuses(self):
+        """lsof failure means unverified, which must fail closed."""
+        self.mod._pid_alive = lambda pid: True
+        self.mod._process_cwd = lambda pid: None
+        ok, _ = self.mod.stop_session_process(self._record(), kill_func=self._kill)
+        assert not ok
+        assert self.killed == []
+
+    def test_record_without_cwd_refuses(self):
+        self.mod._pid_alive = lambda pid: True
+        self.mod._process_cwd = lambda pid: "/tmp/proj"
+        ok, _ = self.mod.stop_session_process(self._record(cwd=None), kill_func=self._kill)
+        assert not ok
+        assert self.killed == []
+
+    def test_process_exits_between_check_and_kill(self):
+        self.mod._pid_alive = lambda pid: True
+        self.mod._process_cwd = lambda pid: "/tmp/proj"
+
+        def gone(pid, sig):
+            raise ProcessLookupError
+
+        ok, msg = self.mod.stop_session_process(self._record(), kill_func=gone)
+        assert not ok
+        assert "exited" in msg
+
+    def test_permission_error_reported(self):
+        self.mod._pid_alive = lambda pid: True
+        self.mod._process_cwd = lambda pid: "/tmp/proj"
+
+        def denied(pid, sig):
+            raise PermissionError("nope")
+
+        ok, msg = self.mod.stop_session_process(self._record(), kill_func=denied)
+        assert not ok
+        assert "12345" in msg
