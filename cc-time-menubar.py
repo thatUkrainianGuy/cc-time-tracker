@@ -14,59 +14,25 @@ import csv
 import io
 import json
 import os
-import re
 import signal
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-TRACKING_DIR = Path.home() / ".claude" / "time-tracking"
-SESSIONS_FILE = TRACKING_DIR / "sessions.jsonl"
-ACTIVE_FILE = TRACKING_DIR / "active.jsonl"
+# Run straight from the repo checkout: import the package from ./src.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+
+from cc_time_tracker.common import (  # noqa: E402
+    TRACKING_DIR, SESSIONS_FILE, ACTIVE_FILE, EVENT_END,
+    acquire_lock, atomic_write_text, coerce_float, coerce_int, csv_safe,
+    load_jsonl, md_safe, pid_alive, rewrite_jsonl, strip_control,
+)
+from cc_time_tracker.report import merge_project_sessions  # noqa: E402,F401
+from cc_time_tracker.sync import CURSOR_FILE as SYNC_CURSOR_FILE, evict_session_ids_from_cursor  # noqa: E402
+
 PROJECTS_META_FILE = TRACKING_DIR / "projects.json"
-LOCK_PATH = TRACKING_DIR / ".lock"
-SYNC_CURSOR_PATH = TRACKING_DIR / "sync-cursor.json"
 REFRESH_INTERVAL = 30  # seconds
-EVENT_END = "end"
-
-# Sanitization helpers — kept inline to preserve menubar's standalone story
-# (see CLAUDE.md). Mirrors cc_time_tracker.common.{strip_control,csv_safe,md_safe}.
-_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
-_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
-_FORMULA_LEADS = ("=", "+", "-", "@", "\t", "\r")
-
-
-def _strip_control(text) -> str:
-    if text is None:
-        return ""
-    if not isinstance(text, str):
-        text = str(text)
-    return _CTRL_RE.sub("", _ANSI_RE.sub("", text))
-
-
-def _csv_safe(value) -> str:
-    text = _strip_control(value)
-    if text and text[0] in _FORMULA_LEADS:
-        text = "'" + text
-    return text
-
-
-def _md_safe(value) -> str:
-    return _strip_control(value).replace("|", r"\|")
-
-
-def _atomic_write_text(path: Path, content: str) -> None:
-    """Write content via temp file + os.replace (POSIX-atomic).
-
-    The temp file is created 0600 before any bytes are written, so files
-    written through this helper land owner-only — matching the data-file
-    permission invariant in cc_time_tracker.common.atomic_write_text.
-    """
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(content)
-    os.replace(tmp, path)
 
 
 def format_duration(seconds: float) -> str:
@@ -79,92 +45,18 @@ def format_duration(seconds: float) -> str:
     return f"{hours}h {minutes}m"
 
 
-def _read_jsonl(path: Path) -> list[dict]:
-    """Read a JSONL file, skipping malformed lines and non-dict records."""
-    try:
-        f = open(path, "r")
-    except FileNotFoundError:
-        return []
-
-    records = []
-    with f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(rec, dict):
-                records.append(rec)
-    return records
-
-
-def _coerce_float(value, default: float = 0.0) -> float:
-    """Best-effort float coercion — returns ``default`` on bad input.
-
-    Defends every aggregation/sort against a poisoned record like
-    ``{"timestamp_unix": "x"}`` which would otherwise crash the menubar.
-    """
-    if isinstance(value, bool):
-        return default
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value)
-        except ValueError:
-            return default
-    return default
-
-
-def _coerce_int(value, default=None):
-    """Best-effort int coercion — returns ``default`` on bad input.
-
-    Mirrors cc_time_tracker.common.coerce_int (see standalone note above).
-    """
-    if isinstance(value, bool):
-        return default
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value) if value == value and abs(value) < float("inf") else default
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return default
-    return default
-
-
-def _acquire_lock(lock_path):
-    """Optional filelock context manager — no-op if filelock not installed."""
-    try:
-        from filelock import FileLock
-        return FileLock(str(lock_path), timeout=5)
-    except ImportError:
-        from contextlib import contextmanager
-
-        @contextmanager
-        def _noop():
-            yield
-
-        return _noop()
-
-
-def load_projects_meta(projects_file: Path, lock_path: Path) -> dict:
-    with _acquire_lock(lock_path):
+def load_projects_meta(projects_file: Path, lock_path: Path | None = None) -> dict:
+    with acquire_lock(lock_path):
         try:
             return json.loads(projects_file.read_text())
         except (FileNotFoundError, json.JSONDecodeError):
             return {}
 
 
-def save_projects_meta(projects_file: Path, meta: dict, lock_path: Path) -> None:
+def save_projects_meta(projects_file: Path, meta: dict, lock_path: Path | None = None) -> None:
     """Write projects.json atomically under lock."""
-    with _acquire_lock(lock_path):
-        _atomic_write_text(projects_file, json.dumps(meta, indent=2) + "\n")
+    with acquire_lock(lock_path):
+        atomic_write_text(projects_file, json.dumps(meta, indent=2) + "\n")
 
 
 def is_archived(meta: dict, project: str) -> bool:
@@ -190,11 +82,11 @@ def _aggregate_sessions_by_date(project: str, sessions: list[dict]) -> list[tupl
     for s in sessions:
         if s.get("project") != project:
             continue
-        ts = _coerce_float(s.get("timestamp_unix"))
+        ts = coerce_float(s.get("timestamp_unix"))
         if not ts:
             continue
         day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-        days.setdefault(day, []).append(_coerce_float(s.get("duration_seconds")))
+        days.setdefault(day, []).append(coerce_float(s.get("duration_seconds")))
 
     return sorted(
         [(day, len(durations), sum(durations)) for day, durations in days.items()]
@@ -210,11 +102,11 @@ def generate_csv_report(project: str, sessions: list[dict]) -> str:
     """Generate a CSV report for a project.
 
     Uses ``csv.writer`` for proper quoting and routes the project name
-    through ``_csv_safe`` so a project called e.g. ``=HYPERLINK(...)``
+    through ``csv_safe`` so a project called e.g. ``=HYPERLINK(...)``
     doesn't fire a formula when the file is opened in Excel/Sheets.
     """
     rows = _aggregate_sessions_by_date(project, sessions)
-    safe_project = _csv_safe(project)
+    safe_project = csv_safe(project)
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
     writer.writerow(["Date", "Project", "Sessions", "Duration", "Hours"])
@@ -228,13 +120,13 @@ def generate_csv_report(project: str, sessions: list[dict]) -> str:
 def generate_md_report(project: str, sessions: list[dict]) -> str:
     """Generate a Markdown report for a project.
 
-    Project names go through ``_md_safe`` (escapes ``|``, strips control
+    Project names go through ``md_safe`` (escapes ``|``, strips control
     chars and embedded newlines) so a project name can't break out of the
     table or inject extra headings.
     """
     rows = _aggregate_sessions_by_date(project, sessions)
     today = datetime.now().strftime("%Y-%m-%d")
-    safe_project = _md_safe(project)
+    safe_project = md_safe(project)
     lines = [
         f"# {safe_project} — Time Report",
         "",
@@ -252,132 +144,12 @@ def generate_md_report(project: str, sessions: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _rewrite_jsonl(path: Path, transform) -> int:
-    """Walk a JSONL file; rewrite atomically with `transform` applied to each record.
-
-    `transform(record)` returns:
-      - a dict to keep (counts as changed iff a different object than the input),
-      - None to drop the record (counts as changed).
-    Malformed lines are preserved verbatim. Returns the change count.
-    Caller is responsible for holding the file lock around this call.
-    """
-    try:
-        raw = path.read_text()
-    except FileNotFoundError:
-        return 0
-    if not raw.strip():
-        return 0
-
-    new_lines = []
-    changed = 0
-    for line in raw.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        try:
-            record = json.loads(stripped)
-        except json.JSONDecodeError:
-            new_lines.append(stripped)
-            continue
-        if not isinstance(record, dict):
-            new_lines.append(stripped)
-            continue
-        result = transform(record)
-        if result is None:
-            changed += 1
-            continue
-        if result is not record:
-            changed += 1
-        new_lines.append(json.dumps(result))
-
-    _atomic_write_text(path, "\n".join(new_lines) + "\n" if new_lines else "")
-    return changed
-
-
-def _evict_session_ids_from_sync_cursor(cursor_path: Path, session_ids) -> int:
-    """Remove every cursor entry whose session_id is in `session_ids`. The
-    cursor file stores entries as "session_id|end_at" so a single session_id
-    can have multiple entries (one per end event); a local merge changes the
-    project field on all of them, so they must all be evicted together.
-    Caller must hold the tracking-dir lock. No-op on missing/malformed
-    cursor. A legacy cursor (pushed_session_ids field) is wiped entirely,
-    forcing the next sync to reconcile. Mirrors
-    cc_time_tracker.sync.evict_session_ids_from_cursor — keep in sync when
-    changing the cursor schema.
-    """
-    ids = set(session_ids)
-    if not ids:
-        return 0
-    try:
-        raw = cursor_path.read_text()
-    except FileNotFoundError:
-        return 0
-    try:
-        cursor = json.loads(raw)
-    except json.JSONDecodeError:
-        return 0
-    if not isinstance(cursor, dict):
-        return 0
-    if "pushed_events" not in cursor and "pushed_session_ids" in cursor:
-        new_cursor = {k: v for k, v in cursor.items() if k != "pushed_session_ids"}
-        new_cursor["pushed_events"] = []
-        _atomic_write_text(cursor_path, json.dumps(new_cursor))
-        return 0
-    pushed = cursor.get("pushed_events") or []
-    if not isinstance(pushed, list):
-        return 0
-    kept: list = []
-    removed = 0
-    for entry in pushed:
-        if not isinstance(entry, str):
-            continue
-        sid_part = entry.split("|", 1)[0]
-        if sid_part in ids:
-            removed += 1
-        else:
-            kept.append(entry)
-    if removed == 0:
-        return 0
-    cursor["pushed_events"] = sorted(kept)
-    _atomic_write_text(cursor_path, json.dumps(cursor))
-    return removed
-
-
-def merge_project_sessions(
-    sessions_file: Path,
-    source_project: str,
-    target_project: str,
-    lock_path: Path = LOCK_PATH,
-    sync_cursor_path: Path = SYNC_CURSOR_PATH,
-) -> int:
-    """Rewrite all sessions for source_project to target_project.
-
-    Returns number of records rewritten. Also evicts affected session_ids from
-    the sync cursor so the next sync re-pushes them under the new project name.
-    """
-    affected_ids: list[str] = []
-
-    def transform(record):
-        if record.get("project") == source_project:
-            sid = record.get("session_id")
-            if isinstance(sid, str):
-                affected_ids.append(sid)
-            return {**record, "project": target_project}
-        return record
-
-    with _acquire_lock(lock_path):
-        rewritten = _rewrite_jsonl(sessions_file, transform)
-        if affected_ids:
-            _evict_session_ids_from_sync_cursor(sync_cursor_path, affected_ids)
-        return rewritten
-
-
 def delete_project_sessions(
     sessions_file: Path,
     project: str,
     today_only: bool,
-    lock_path: Path = LOCK_PATH,
-    sync_cursor_path: Path = SYNC_CURSOR_PATH,
+    lock_path: Path | None = None,
+    sync_cursor_path: Path | None = None,
 ) -> int:
     """Remove sessions for a project from the JSONL file.
 
@@ -397,10 +169,10 @@ def delete_project_sessions(
                 return None
         return record
 
-    with _acquire_lock(lock_path):
-        removed = _rewrite_jsonl(sessions_file, transform)
+    with acquire_lock(lock_path):
+        removed = rewrite_jsonl(sessions_file, transform)
         if affected_ids:
-            _evict_session_ids_from_sync_cursor(sync_cursor_path, affected_ids)
+            evict_session_ids_from_cursor(sync_cursor_path or SYNC_CURSOR_FILE, affected_ids)
         return removed
 
 
@@ -409,39 +181,17 @@ def get_today_start_unix() -> float:
     return today.timestamp()
 
 
-def load_today_sessions(sessions_file: Path) -> list[dict]:
-    """Load today's completed sessions (end events only) from JSONL file."""
-    today_start = get_today_start_unix()
-    return [
-        r for r in _read_jsonl(sessions_file)
-        if r.get("event") == EVENT_END
-        and r.get("duration_seconds") is not None
-        and _coerce_float(r.get("timestamp_unix")) >= today_start
-    ]
-
-
 def load_all_completed_sessions(sessions_file: Path) -> list[dict]:
     """Load all completed sessions (end events only) from JSONL file, no date filter."""
     return [
-        r for r in _read_jsonl(sessions_file)
+        r for r in load_jsonl(sessions_file)
         if r.get("event") == EVENT_END
         and r.get("duration_seconds") is not None
     ]
 
 
 def load_active_sessions(active_file: Path) -> list[dict]:
-    return _read_jsonl(active_file)
-
-
-def _pid_alive(pid: int) -> bool:
-    """Mirrors cc_time_tracker.start_hook._pid_alive."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True
-    return True
+    return load_jsonl(active_file)
 
 
 def _process_cwd(pid: int):
@@ -473,10 +223,10 @@ def find_active_record_process(record: dict):
     pid <= 0 is rejected outright — os.kill(0)/os.kill(-n) signal whole
     process groups, not a single process.
     """
-    pid = _coerce_int(record.get("pid"))
+    pid = coerce_int(record.get("pid"))
     if pid is None or pid <= 0:
         return None, "No pid recorded for this session."
-    if not _pid_alive(pid):
+    if not pid_alive(pid):
         return None, (
             "Process is not running — the timer is an orphan and will be "
             "cleaned up on the next session start."
@@ -533,17 +283,17 @@ def build_project_data(
 
     for s in today_sessions:
         proj = s.get("project", "unknown")
-        dur = _coerce_float(s.get("duration_seconds"))
+        dur = coerce_float(s.get("duration_seconds"))
         today_time[proj] = today_time.get(proj, 0) + dur
 
     for s in all_sessions:
         proj = s.get("project", "unknown")
-        dur = _coerce_float(s.get("duration_seconds"))
+        dur = coerce_float(s.get("duration_seconds"))
         total_time[proj] = total_time.get(proj, 0) + dur
 
     for s in active_sessions:
         proj = s.get("project", "unknown")
-        start_ts = _coerce_float(s.get("timestamp_unix"), default=now)
+        start_ts = coerce_float(s.get("timestamp_unix"), default=now)
         elapsed = max(0, now - start_ts)
         today_time[proj] = today_time.get(proj, 0) + elapsed
         total_time[proj] = total_time.get(proj, 0) + elapsed
@@ -618,7 +368,7 @@ def main():
                 r for r in all_completed
                 if r.get("timestamp_unix", 0) >= today_start
             ]
-            meta = load_projects_meta(PROJECTS_META_FILE, LOCK_PATH)
+            meta = load_projects_meta(PROJECTS_META_FILE)
 
             meta_changed = False
             for s in active:
@@ -627,7 +377,7 @@ def main():
                     set_archived(meta, proj, False)
                     meta_changed = True
             if meta_changed:
-                save_projects_meta(PROJECTS_META_FILE, meta, LOCK_PATH)
+                save_projects_meta(PROJECTS_META_FILE, meta)
 
             projects, today_total = build_project_data(today_completed, all_completed, active)
 
@@ -666,7 +416,7 @@ def main():
                         item.add(merge_menu)
                     item.add(rumps.MenuItem(
                         "Archive",
-                        callback=lambda _, p=name: self._archive_project(p),
+                        callback=lambda _, p=name: self._set_project_archived(p, True),
                     ))
                     item.add(rumps.MenuItem(
                         "Delete today's sessions",
@@ -696,7 +446,7 @@ def main():
                     self._add_export_items(aitem, name)
                     aitem.add(rumps.MenuItem(
                         "Unarchive",
-                        callback=lambda _, p=name: self._unarchive_project(p),
+                        callback=lambda _, p=name: self._set_project_archived(p, False),
                     ))
                     aitem.add(rumps.MenuItem(
                         "Delete project",
@@ -706,7 +456,7 @@ def main():
                 self.menu.add(archived_menu)
 
             self.menu.add(rumps.separator)
-            self.menu.add(rumps.MenuItem("Quit", callback=self.quit_app))
+            self.menu.add(rumps.MenuItem("Quit", callback=rumps.quit_application))
 
         def _schedule_refresh(self, delay=0.1):
             """Defer refresh to next run loop iteration to avoid mutating menu mid-callback."""
@@ -718,7 +468,7 @@ def main():
             self.refresh(None)
 
         def _bring_to_front(self):
-            from AppKit import NSApplication, NSApplicationActivateIgnoringOtherApps
+            from AppKit import NSApplication
             NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
 
         def _delete_sessions(self, project, today_only):
@@ -734,15 +484,15 @@ def main():
                 self._schedule_refresh()
 
         def _make_stop_item(self, record):
-            pid = _coerce_int(record.get("pid"))
-            start_ts = _coerce_float(record.get("timestamp_unix"))
+            pid = coerce_int(record.get("pid"))
+            start_ts = coerce_float(record.get("timestamp_unix"))
             since = datetime.fromtimestamp(start_ts).strftime("%H:%M") if start_ts else "?"
             label = f"Stop session (pid {pid if pid is not None else '?'}, since {since})"
             return rumps.MenuItem(label, callback=lambda _, r=record: self._stop_session(r))
 
         def _stop_session(self, record):
             self._bring_to_front()
-            project = _strip_control(record.get("project", "unknown"))
+            project = strip_control(record.get("project", "unknown"))
             pid, err = find_active_record_process(record)
             if pid is None:
                 rumps.alert(title="Cannot Stop Session", message=err)
@@ -783,9 +533,9 @@ def main():
             )
             if response == 1:
                 merge_project_sessions(SESSIONS_FILE, source, target)
-                meta = load_projects_meta(PROJECTS_META_FILE, LOCK_PATH)
+                meta = load_projects_meta(PROJECTS_META_FILE)
                 remove_project_meta(meta, source)
-                save_projects_meta(PROJECTS_META_FILE, meta, LOCK_PATH)
+                save_projects_meta(PROJECTS_META_FILE, meta)
                 self._schedule_refresh()
 
         def _delete_project(self, project):
@@ -799,34 +549,26 @@ def main():
             if response == 1:
                 delete_project_sessions(SESSIONS_FILE, project, today_only=False)
                 delete_project_sessions(ACTIVE_FILE, project, today_only=False)
-                meta = load_projects_meta(PROJECTS_META_FILE, LOCK_PATH)
+                meta = load_projects_meta(PROJECTS_META_FILE)
                 remove_project_meta(meta, project)
-                save_projects_meta(PROJECTS_META_FILE, meta, LOCK_PATH)
+                save_projects_meta(PROJECTS_META_FILE, meta)
                 self._schedule_refresh()
 
-        def _archive_project(self, project):
-            self._set_project_archived(project, True)
-
-        def _unarchive_project(self, project):
-            self._set_project_archived(project, False)
-
         def _set_project_archived(self, project, archived):
-            meta = load_projects_meta(PROJECTS_META_FILE, LOCK_PATH)
+            meta = load_projects_meta(PROJECTS_META_FILE)
             set_archived(meta, project, archived)
-            save_projects_meta(PROJECTS_META_FILE, meta, LOCK_PATH)
+            save_projects_meta(PROJECTS_META_FILE, meta)
             self._schedule_refresh()
 
         def _export_report(self, project, fmt):
             self._bring_to_front()
             from AppKit import NSSavePanel
 
-            all_sessions = self._cached_all_completed or load_all_completed_sessions(SESSIONS_FILE)
-
             if fmt == "csv":
-                content = generate_csv_report(project, all_sessions)
+                content = generate_csv_report(project, self._cached_all_completed)
                 ext = "csv"
             else:
-                content = generate_md_report(project, all_sessions)
+                content = generate_md_report(project, self._cached_all_completed)
                 ext = "md"
 
             today = datetime.now().strftime("%Y-%m-%d")
@@ -839,9 +581,6 @@ def main():
             if panel.runModal() == 1:  # NSModalResponseOK
                 path = panel.URL().path()
                 Path(path).write_text(content, encoding="utf-8")
-
-        def quit_app(self, _):
-            rumps.quit_application()
 
     CCTimeMenuBar().run()
 

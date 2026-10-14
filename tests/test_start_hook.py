@@ -142,7 +142,7 @@ def test_start_hook_cleans_dead_pid(tmp_path):
         patch("cc_time_tracker.common.LOCK_FILE", tmp_path / ".lock"),
         patch("cc_time_tracker.start_hook.SESSIONS_FILE", sessions),
         patch("cc_time_tracker.start_hook.ACTIVE_FILE", active),
-        patch("cc_time_tracker.start_hook._pid_alive", side_effect=fake_alive),
+        patch("cc_time_tracker.start_hook.pid_alive", side_effect=fake_alive),
         patch("sys.stdin", StringIO(input_data)),
     ):
         try:

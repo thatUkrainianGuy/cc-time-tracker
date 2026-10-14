@@ -3,9 +3,9 @@
 import json
 import os
 import stat
-import tempfile
-from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from cc_time_tracker.common import (
     PROJECT_NAME_MAX_LEN,
@@ -144,10 +144,14 @@ def test_ensure_dir(tmp_path):
     assert d.is_dir()
 
 
-def test_acquire_lock_returns_context_manager():
-    lock = acquire_lock(Path(tempfile.gettempdir()) / "test.lock")
-    with lock:
-        pass  # should not raise
+def test_acquire_lock_excludes_second_holder(tmp_path):
+    lock_path = tmp_path / ".lock"
+    with acquire_lock(lock_path):
+        with pytest.raises(TimeoutError):
+            with acquire_lock(lock_path, timeout=0.1):
+                pass
+    with acquire_lock(lock_path, timeout=0.1):
+        pass  # released on exit
 
 
 # ─── Sanitization ──────────────────────────────────────────────────────

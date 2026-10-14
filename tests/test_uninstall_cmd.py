@@ -1,7 +1,6 @@
 """Tests for cc_time_tracker.uninstall_cmd"""
 
 import json
-from pathlib import Path
 
 from cc_time_tracker.uninstall_cmd import remove_hooks
 

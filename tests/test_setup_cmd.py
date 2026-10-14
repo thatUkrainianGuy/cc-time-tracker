@@ -1,8 +1,6 @@
 """Tests for cc_time_tracker.setup_cmd"""
 
 import json
-from pathlib import Path
-from unittest.mock import patch
 
 from cc_time_tracker.setup_cmd import merge_hooks, is_already_installed
 

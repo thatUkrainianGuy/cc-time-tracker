@@ -226,31 +226,6 @@ def test_5xx_keeps_cursor_unchanged(workdir):
     assert not (workdir / "sync-cursor.json").exists()
 
 
-def test_legacy_cursor_with_only_session_ids_is_treated_as_empty(workdir):
-    """Cursor written by the pre-composite-PK client used pushed_session_ids.
-    Reading such a cursor must not skip events — the new format keys by
-    (session_id, end_at) and the old data is insufficient to reconstruct
-    those keys. Re-pushing is safe because the server handles idempotency."""
-    cursor = workdir / "sync-cursor.json"
-    cursor.write_text(json.dumps({"pushed_session_ids": ["a", "b"]}))
-    write_sessions(
-        workdir / "sessions.jsonl",
-        [
-            {"event": "end", "session_id": "a", "project": "x",
-             "timestamp_unix": 2.0, "duration_seconds": 1.0},
-        ],
-    )
-    fake_resp = MagicMock(status=200)
-    fake_resp.read.return_value = b'{"ingested":1,"skipped":0}'
-    with patch.object(sync, "_http_post", return_value=fake_resp) as p:
-        rc = sync.run_once(dry_run=False)
-    assert rc == 0
-    p.assert_called_once()  # event was sent, not skipped
-    cur = json.loads(cursor.read_text())
-    assert "pushed_session_ids" not in cur  # legacy field dropped
-    assert _key("a", 2.0) in cur["pushed_events"]
-
-
 # ── evict_session_ids_from_cursor ──────────────────────────────────────────
 
 
@@ -295,13 +270,3 @@ def test_evict_empty_ids_is_noop(workdir):
     assert removed == 0
     cur = json.loads(cursor.read_text())
     assert cur["pushed_events"] == [_key("a", 1.0)]
-
-
-def test_evict_handles_legacy_cursor_format(workdir):
-    """A merge running against a pre-migration cursor file (still using
-    pushed_session_ids) should not crash; the cursor is essentially
-    invalidated, which is fine — next sync re-pushes everything."""
-    cursor = workdir / "sync-cursor.json"
-    cursor.write_text(json.dumps({"pushed_session_ids": ["a", "b"]}))
-    # Must not raise.
-    sync.evict_session_ids_from_cursor(cursor, ["a"])

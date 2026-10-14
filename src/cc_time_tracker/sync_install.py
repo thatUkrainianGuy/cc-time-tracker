@@ -59,24 +59,20 @@ def _build_plist(pythonpath: Path) -> dict:
     }
 
 
-def _reload_agent() -> int:
-    """Reload the agent using the modern domain verbs. `launchctl load/unload`
-    silently no-op against an already-bootstrapped job on recent macOS, so a
-    reinstall would not actually apply plist changes — use bootout/bootstrap and
-    fall back to the legacy verbs only if bootstrap is unavailable."""
-    domain = f"gui/{os.getuid()}"
+def _bootout() -> None:
     subprocess.run(
-        ["launchctl", "bootout", f"{domain}/{LABEL}"],
+        ["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"],
         check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    rc = subprocess.run(["launchctl", "bootstrap", domain, str(PLIST_PATH)], check=False).returncode
-    if rc != 0:
-        subprocess.run(
-            ["launchctl", "unload", str(PLIST_PATH)],
-            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        rc = subprocess.run(["launchctl", "load", str(PLIST_PATH)], check=False).returncode
-    return rc
+
+
+def _reload_agent() -> int:
+    """Reload via bootout/bootstrap. Legacy `launchctl load/unload` silently
+    no-op against an already-bootstrapped job, so plist changes wouldn't apply."""
+    _bootout()
+    return subprocess.run(
+        ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(PLIST_PATH)], check=False,
+    ).returncode
 
 
 def install(endpoint: str | None) -> int:
@@ -109,17 +105,8 @@ def install(endpoint: str | None) -> int:
 
 
 def uninstall() -> int:
-    subprocess.run(
-        ["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"],
-        check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    _bootout()
     if PLIST_PATH.exists():
-        subprocess.run(
-            ["launchctl", "unload", str(PLIST_PATH)],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
         PLIST_PATH.unlink()
         print(f"removed {PLIST_PATH}")
     else:

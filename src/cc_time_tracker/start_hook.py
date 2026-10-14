@@ -8,23 +8,11 @@ from datetime import datetime, timezone
 from cc_time_tracker.common import (
     SESSIONS_FILE, ACTIVE_FILE, EVENT_START, EVENT_END, REASON_ORPHAN_CLEANUP,
     ensure_dir, harden_file_perms, acquire_lock, extract_project_name,
-    load_jsonl, read_hook_input, coerce_float, coerce_int, strip_control,
+    load_jsonl, read_hook_input, coerce_float, coerce_int, strip_control, pid_alive,
 )
 
 ORPHAN_THRESHOLD_SECONDS = 24 * 3600  # fallback for records without a pid
 HOOK_LOCK_TIMEOUT_SECONDS = 2  # leaves slack under CC's 5s hook timeout
-
-
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return True
-    return True
 
 
 def _cleanup_orphans(now_ts: float) -> tuple[list[dict], list[dict]]:
@@ -40,7 +28,7 @@ def _cleanup_orphans(now_ts: float) -> tuple[list[dict], list[dict]]:
         start_ts = coerce_float(rec.get("timestamp_unix"), default=now_ts)
         pid = coerce_int(rec.get("pid"))
         if pid is not None:
-            is_orphan = not _pid_alive(pid)
+            is_orphan = not pid_alive(pid)
         else:
             is_orphan = now_ts - start_ts > ORPHAN_THRESHOLD_SECONDS
         if is_orphan:

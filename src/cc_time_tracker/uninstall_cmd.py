@@ -1,12 +1,11 @@
 """cc-time-uninstall — remove time-tracking hooks from Claude Code settings."""
 
 import json
-import sys
 from pathlib import Path
 
 from cc_time_tracker.common import (
     TRACKING_DIR, SETTINGS_FILE, load_settings, is_tracker_hook_group,
-    BOLD, GREEN, RED, DIM, RESET,
+    BOLD, GREEN, DIM, RESET,
 )
 
 

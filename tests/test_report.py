@@ -110,12 +110,10 @@ def test_merge_evicts_affected_session_ids_from_sync_cursor(tmp_path, monkeypatc
         json.dumps({"pushed_events": ["s1|1.0", "s2|2.0", "s3|3.0"]})
     )
 
-    monkeypatch.setattr(common, "SESSIONS_FILE", sessions_file)
     monkeypatch.setattr(common, "LOCK_FILE", lock_file)
-    monkeypatch.setattr(report, "SESSIONS_FILE", sessions_file)
     monkeypatch.setattr(sync, "CURSOR_FILE", cursor_file)
 
-    count = report.merge_project_sessions("old", "new")
+    count = report.merge_project_sessions(sessions_file, "old", "new")
     assert count == 2
 
     cur = json.loads(cursor_file.read_text())
@@ -134,10 +132,8 @@ def test_merge_tolerates_absent_sync_cursor(tmp_path, monkeypatch):
                     "duration_seconds": 100, "timestamp_unix": 1.0}) + "\n"
     )
 
-    monkeypatch.setattr(common, "SESSIONS_FILE", sessions_file)
     monkeypatch.setattr(common, "LOCK_FILE", lock_file)
-    monkeypatch.setattr(report, "SESSIONS_FILE", sessions_file)
     monkeypatch.setattr(sync, "CURSOR_FILE", cursor_file)
 
-    assert report.merge_project_sessions("old", "new") == 1
+    assert report.merge_project_sessions(sessions_file, "old", "new") == 1
     assert not cursor_file.exists()

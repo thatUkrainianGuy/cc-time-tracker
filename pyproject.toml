@@ -25,9 +25,6 @@ cc-time-uninstall = "cc_time_tracker.uninstall_cmd:main"
 cc-time-sync = "cc_time_tracker.sync:main"
 cc-time-sync-install = "cc_time_tracker.sync_install:main"
 
-[project.optional-dependencies]
-lock = ["filelock"]
-
 [project.urls]
 Homepage = "https://github.com/riabchuk/cc-time-tracker"
 Issues = "https://github.com/riabchuk/cc-time-tracker/issues"

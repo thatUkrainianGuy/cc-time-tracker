@@ -8,15 +8,8 @@ from pathlib import Path
 from cc_time_tracker.common import (
     TRACKING_DIR, SETTINGS_FILE, ensure_dir, harden_file_perms,
     load_settings, is_tracker_hook_group,
-    BOLD, GREEN, YELLOW, DIM, RESET,
+    BOLD, GREEN, YELLOW, RESET,
 )
-
-OLD_HOOK_FILES = [
-    Path.home() / ".claude" / "hooks" / "cc-time-start.py",
-    Path.home() / ".claude" / "hooks" / "cc-time-end.py",
-]
-OLD_BIN_FILE = Path.home() / ".local" / "bin" / "cc-time-report"
-
 
 def _has_tracker_hooks(settings: dict) -> bool:
     """True if any SessionStart group in settings is one of ours."""
@@ -74,16 +67,6 @@ def merge_hooks(settings_file: Path, python_path: str) -> None:
     print(f"  {GREEN}✓ Registered hooks in {settings_file}{RESET}")
 
 
-def warn_old_install() -> None:
-    """Detect and warn about old-style hook files."""
-    old_found = [p for p in OLD_HOOK_FILES + [OLD_BIN_FILE] if p.exists()]
-    if old_found:
-        print(f"\n  {YELLOW}⚠ Old install detected. You can remove these:{RESET}")
-        for p in old_found:
-            print(f"    rm {p}")
-        print()
-
-
 def main():
     print(f"\n{BOLD}Claude Code Time Tracker — Setup{RESET}\n")
 
@@ -98,8 +81,6 @@ def main():
 
     python_path = sys.executable
     merge_hooks(SETTINGS_FILE, python_path)
-
-    warn_old_install()
 
     print(f"\n  {GREEN}{BOLD}Done!{RESET} Time tracking is now active for all Claude Code sessions.")
     print(f"  Run {BOLD}cc-time-report{RESET} to see your stats.\n")

@@ -102,16 +102,6 @@ All three track independently. The report sums A+C under "my-app" and B under "a
 - **`/resume`**: SessionStart fires with `source: "resume"`. Tracked as a new timing segment.
 - **Timeout safety**: Both hooks have 5s timeout (SessionEnd default is only 1.5s — we override it). Writing JSONL is <1ms.
 
-## Optional: filelock
-
-For maximum safety with many concurrent sessions:
-
-```bash
-pip install cc-time-tracker[lock]
-```
-
-Without it, the scripts still work (race conditions are extremely unlikely with JSONL appends on modern filesystems).
-
 ## Optional: Menu Bar App (macOS)
 
 A standalone menu bar app with cumulative per-project tracking:

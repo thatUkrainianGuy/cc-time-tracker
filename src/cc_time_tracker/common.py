@@ -1,8 +1,11 @@
 """Shared constants and utilities for cc-time-tracker."""
 
+import fcntl
 import json
 import os
 import re
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -41,11 +44,6 @@ RESET = "\033[0m"
 UNDERLINE = "\033[4m"
 
 
-class _NoLock:
-    def __enter__(self): return self
-    def __exit__(self, *a): pass
-
-
 def ensure_dir(path: Path | None = None) -> None:
     """Create the tracking directory with 0700 perms (owner-only)."""
     target = path or TRACKING_DIR
@@ -64,13 +62,30 @@ def harden_file_perms(path: Path) -> None:
         pass
 
 
+@contextmanager
 def acquire_lock(lock_path: Path | None = None, timeout: float = 5):
-    """Return a file lock (or no-op if filelock not installed)."""
+    """Hold an exclusive flock on the tracking-dir lock file.
+
+    The kernel drops the lock when the fd closes, so a crashed holder can't
+    leave it stale. Not reentrant: a nested acquire in one process blocks
+    until ``timeout``. Raises TimeoutError if the lock stays busy.
+    """
+    path = lock_path or LOCK_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        from filelock import FileLock
-        return FileLock(str(lock_path or LOCK_FILE), timeout=timeout)
-    except ImportError:
-        return _NoLock()
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"lock busy: {path}")
+                time.sleep(0.05)
+        yield
+    finally:
+        os.close(fd)
 
 
 def atomic_write_text(path: Path, content: str) -> None:
@@ -162,30 +177,31 @@ def coerce_float(value, default: float = 0.0) -> float:
     """Best-effort coerce to float. Returns ``default`` on bad input."""
     if isinstance(value, bool):
         return default
-    if isinstance(value, (int, float)):
+    try:
         return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value)
-        except ValueError:
-            return default
-    return default
+    except (TypeError, ValueError):
+        return default
 
 
 def coerce_int(value, default: int | None = None) -> int | None:
     """Best-effort coerce to int. Returns ``default`` on bad input."""
     if isinstance(value, bool):
         return default
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value) if value == value and abs(value) < float("inf") else default
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return default
-    return default
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def pid_alive(pid: int) -> bool:
+    """True unless the pid is definitely gone (EPERM means it exists)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
 
 
 def extract_project_name(cwd: str) -> str:
@@ -293,3 +309,45 @@ def load_jsonl(path: Path, after_ts: float | None = None) -> list[dict]:
                     continue
             records.append(record)
     return records
+
+
+def rewrite_jsonl(path: Path, transform) -> int:
+    """Walk a JSONL file; rewrite atomically with `transform` applied to each record.
+
+    `transform(record)` returns:
+      - a dict to keep (counts as changed iff a different object than the input),
+      - None to drop the record (counts as changed).
+    Malformed lines are preserved verbatim. Returns the change count.
+    Caller is responsible for holding the file lock around this call.
+    """
+    try:
+        raw = path.read_text()
+    except FileNotFoundError:
+        return 0
+    if not raw.strip():
+        return 0
+
+    new_lines = []
+    changed = 0
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            record = json.loads(stripped)
+        except json.JSONDecodeError:
+            new_lines.append(stripped)
+            continue
+        if not isinstance(record, dict):
+            new_lines.append(stripped)
+            continue
+        result = transform(record)
+        if result is None:
+            changed += 1
+            continue
+        if result is not record:
+            changed += 1
+        new_lines.append(json.dumps(result))
+
+    atomic_write_text(path, "\n".join(new_lines) + "\n" if new_lines else "")
+    return changed

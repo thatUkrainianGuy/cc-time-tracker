@@ -63,51 +63,6 @@ class TestFormatDuration:
         assert self.mod.format_duration(3600) == "1h 0m"
 
 
-class TestLoadTodaySessions:
-    def setup_method(self):
-        self.mod = load_menubar()
-        self.tmpdir = tempfile.mkdtemp()
-        self.sessions_file = Path(self.tmpdir) / "sessions.jsonl"
-
-    def _now_unix(self):
-        return datetime.now(timezone.utc).timestamp()
-
-    def test_empty_file(self):
-        self.sessions_file.write_text("")
-        result = self.mod.load_today_sessions(self.sessions_file)
-        assert result == []
-
-    def test_no_file(self):
-        nonexistent = Path(self.tmpdir) / "nope.jsonl"
-        result = self.mod.load_today_sessions(nonexistent)
-        assert result == []
-
-    def test_filters_to_today_end_events(self):
-        now = self._now_unix()
-        yesterday = now - 86400 * 2
-        lines = [
-            make_start_record("s1", "proj", "/tmp/proj", now - 3600),
-            make_end_record("s1", "proj", "/tmp/proj", now, 3600),
-            make_end_record("s2", "old", "/tmp/old", yesterday, 100),
-        ]
-        self.sessions_file.write_text("\n".join(lines) + "\n")
-        result = self.mod.load_today_sessions(self.sessions_file)
-        assert len(result) == 1
-        assert result[0]["project"] == "proj"
-        assert result[0]["event"] == "end"
-
-    def test_skips_malformed_lines(self):
-        now = self._now_unix()
-        lines = [
-            "not json at all",
-            make_end_record("s1", "proj", "/tmp/proj", now, 100),
-            "{broken json",
-        ]
-        self.sessions_file.write_text("\n".join(lines) + "\n")
-        result = self.mod.load_today_sessions(self.sessions_file)
-        assert len(result) == 1
-
-
 class TestLoadAllCompletedSessions:
     def setup_method(self):
         self.mod = load_menubar()
@@ -300,7 +255,7 @@ class TestDeleteProjectSessions:
         self.sessions_file.write_text("\n".join(lines) + "\n")
         removed = self.mod.delete_project_sessions(self.sessions_file, "proj-a", today_only=False, lock_path=self.lock_path)
         assert removed == 3
-        remaining = self.mod._read_jsonl(self.sessions_file)
+        remaining = self.mod.load_jsonl(self.sessions_file)
         assert len(remaining) == 2
         assert all(r["project"] == "proj-b" for r in remaining)
 
@@ -315,7 +270,7 @@ class TestDeleteProjectSessions:
         self.sessions_file.write_text("\n".join(lines) + "\n")
         removed = self.mod.delete_project_sessions(self.sessions_file, "proj-a", today_only=True, lock_path=self.lock_path)
         assert removed == 2
-        remaining = self.mod._read_jsonl(self.sessions_file)
+        remaining = self.mod.load_jsonl(self.sessions_file)
         assert len(remaining) == 1
         assert remaining[0]["timestamp_unix"] == yesterday
 
@@ -399,7 +354,7 @@ class TestMergeProjectSessions:
             self.sessions_file, "worker-123", "my-project", lock_path=self.lock_path,
         )
         assert rewritten == 2
-        remaining = self.mod._read_jsonl(self.sessions_file)
+        remaining = self.mod.load_jsonl(self.sessions_file)
         assert len(remaining) == 4
         assert all(r["project"] == "my-project" for r in remaining)
 
@@ -413,7 +368,7 @@ class TestMergeProjectSessions:
             self.sessions_file, "nonexistent", "my-project", lock_path=self.lock_path,
         )
         assert rewritten == 0
-        remaining = self.mod._read_jsonl(self.sessions_file)
+        remaining = self.mod.load_jsonl(self.sessions_file)
         assert len(remaining) == 1
         assert remaining[0]["project"] == "my-project"
 
@@ -462,7 +417,7 @@ class TestMergeProjectSessions:
         self.mod.merge_project_sessions(
             self.sessions_file, "worker", "target", lock_path=self.lock_path,
         )
-        remaining = self.mod._read_jsonl(self.sessions_file)
+        remaining = self.mod.load_jsonl(self.sessions_file)
         assert len(remaining) == 1
         r = remaining[0]
         assert r["project"] == "target"
@@ -660,19 +615,6 @@ class TestPoisonedRecords:
         self.tmpdir = tempfile.mkdtemp()
         self.sessions_file = Path(self.tmpdir) / "sessions.jsonl"
 
-    def test_load_today_tolerates_string_timestamp(self):
-        """``timestamp_unix: "x"`` would crash a comparison; coerce_float saves us."""
-        lines = [
-            json.dumps({"event": "end", "duration_seconds": 60,
-                        "timestamp_unix": "not-a-number", "project": "x"}),
-            make_end_record("s1", "proj", "/tmp/proj", datetime.now(timezone.utc).timestamp(), 60),
-        ]
-        self.sessions_file.write_text("\n".join(lines) + "\n")
-        # Should not raise — the bad record gets timestamp coerced to 0,
-        # therefore filtered out as "not today".
-        result = self.mod.load_today_sessions(self.sessions_file)
-        assert all(r.get("project") == "proj" for r in result)
-
     def test_build_project_data_tolerates_bad_duration(self):
         """A poisoned ``duration_seconds: "x"`` should be treated as 0."""
         today = [{"project": "proj", "duration_seconds": "garbage"}]
@@ -689,7 +631,7 @@ class TestPoisonedRecords:
         self.sessions_file.write_text(
             '{"a":1}\n[1,2,3]\n42\n"string"\nnull\n{"b":2}\n'
         )
-        result = self.mod._read_jsonl(self.sessions_file)
+        result = self.mod.load_jsonl(self.sessions_file)
         assert result == [{"a": 1}, {"b": 2}]
 
 
@@ -710,7 +652,7 @@ class TestStopSessionProcess:
 
     def test_happy_path_sends_sigterm(self):
         import signal
-        self.mod._pid_alive = lambda pid: True
+        self.mod.pid_alive = lambda pid: True
         self.mod._process_cwd = lambda pid: "/tmp/proj"
         ok, msg = self.mod.stop_session_process(self._record(), kill_func=self._kill)
         assert ok
@@ -734,7 +676,7 @@ class TestStopSessionProcess:
         assert self.killed == []
 
     def test_dead_pid_reports_orphan(self):
-        self.mod._pid_alive = lambda pid: False
+        self.mod.pid_alive = lambda pid: False
         ok, msg = self.mod.stop_session_process(self._record(), kill_func=self._kill)
         assert not ok
         assert "orphan" in msg
@@ -742,7 +684,7 @@ class TestStopSessionProcess:
 
     def test_cwd_mismatch_refuses(self):
         """A recycled pid with a different cwd must never be signalled."""
-        self.mod._pid_alive = lambda pid: True
+        self.mod.pid_alive = lambda pid: True
         self.mod._process_cwd = lambda pid: "/somewhere/else"
         ok, msg = self.mod.stop_session_process(self._record(), kill_func=self._kill)
         assert not ok
@@ -750,21 +692,21 @@ class TestStopSessionProcess:
 
     def test_unverifiable_cwd_refuses(self):
         """lsof failure means unverified, which must fail closed."""
-        self.mod._pid_alive = lambda pid: True
+        self.mod.pid_alive = lambda pid: True
         self.mod._process_cwd = lambda pid: None
         ok, _ = self.mod.stop_session_process(self._record(), kill_func=self._kill)
         assert not ok
         assert self.killed == []
 
     def test_record_without_cwd_refuses(self):
-        self.mod._pid_alive = lambda pid: True
+        self.mod.pid_alive = lambda pid: True
         self.mod._process_cwd = lambda pid: "/tmp/proj"
         ok, _ = self.mod.stop_session_process(self._record(cwd=None), kill_func=self._kill)
         assert not ok
         assert self.killed == []
 
     def test_process_exits_between_check_and_kill(self):
-        self.mod._pid_alive = lambda pid: True
+        self.mod.pid_alive = lambda pid: True
         self.mod._process_cwd = lambda pid: "/tmp/proj"
 
         def gone(pid, sig):
@@ -775,7 +717,7 @@ class TestStopSessionProcess:
         assert "exited" in msg
 
     def test_permission_error_reported(self):
-        self.mod._pid_alive = lambda pid: True
+        self.mod.pid_alive = lambda pid: True
         self.mod._process_cwd = lambda pid: "/tmp/proj"
 
         def denied(pid, sig):

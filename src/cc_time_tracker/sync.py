@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import urllib.error
 import urllib.parse
@@ -11,10 +10,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Iterable
 
-from .common import load_jsonl, ensure_dir, atomic_write_text, harden_file_perms, strip_control
+from .common import (
+    TRACKING_DIR, SESSIONS_FILE, EVENT_END,
+    load_jsonl, ensure_dir, atomic_write_text, harden_file_perms, strip_control, coerce_float,
+)
 
-TRACKING_DIR = Path(os.environ.get("CC_TIME_TRACKING_DIR", str(Path.home() / ".claude" / "time-tracking")))
-SESSIONS_FILE = TRACKING_DIR / "sessions.jsonl"
 CURSOR_FILE = TRACKING_DIR / "sync-cursor.json"
 CONFIG_FILE = TRACKING_DIR / "sync-config.json"
 
@@ -26,7 +26,6 @@ BATCH_SIZE = 100
 # session_id can produce multiple end events that we must each push as a
 # separate row server-side.
 _CURSOR_KEY = "pushed_events"
-_LEGACY_CURSOR_KEY = "pushed_session_ids"
 
 
 def _event_key(session_id: str, end_at: float) -> str:
@@ -51,31 +50,23 @@ def _load_config() -> dict[str, str]:
 
 
 def _load_cursor() -> dict[str, Any]:
-    """Read the cursor file. A legacy cursor with only `pushed_session_ids`
-    cannot be translated to the new event-key format (we don't know which
-    end_at value each pre-migration push had), so we discard it and let the
-    next sync re-push everything. The server is idempotent on
-    (session_id, end_at) so re-push is safe."""
-    if not CURSOR_FILE.exists():
-        return {_CURSOR_KEY: []}
+    """Read the cursor file; missing or malformed means nothing pushed yet.
+    Re-pushing is safe because the server is idempotent on (session_id, end_at)."""
     try:
         cursor = json.loads(CURSOR_FILE.read_text())
-    except Exception:
+    except (OSError, ValueError):
         return {_CURSOR_KEY: []}
     if not isinstance(cursor, dict):
         return {_CURSOR_KEY: []}
-    if _CURSOR_KEY not in cursor and _LEGACY_CURSOR_KEY in cursor:
-        # Legacy cursor — drop the old field, start with an empty event list.
-        cursor = {_CURSOR_KEY: []}
     cursor.setdefault(_CURSOR_KEY, [])
     return cursor
 
 
-def _save_cursor(cursor: dict[str, Any]) -> None:
-    ensure_dir(TRACKING_DIR)
-    cursor.pop(_LEGACY_CURSOR_KEY, None)
-    atomic_write_text(CURSOR_FILE, json.dumps(cursor))
-    harden_file_perms(CURSOR_FILE)
+def _save_cursor(cursor: dict[str, Any], path: Path | None = None) -> None:
+    path = path or CURSOR_FILE
+    ensure_dir(path.parent)
+    atomic_write_text(path, json.dumps(cursor))
+    harden_file_perms(path)
 
 
 def evict_session_ids_from_cursor(cursor_path: Path, session_ids: Iterable[str]) -> int:
@@ -84,50 +75,24 @@ def evict_session_ids_from_cursor(cursor_path: Path, session_ids: Iterable[str])
     sync re-pushes the affected records. A local merge changes the project
     field on every end event for a session_id, so all those event keys must
     be evicted together. Caller must hold the tracking-dir lock. No-op if
-    the cursor file is missing, malformed, or uses the legacy format
-    (which is also wiped, forcing the next sync to reconcile)."""
+    the cursor file is missing or malformed."""
     ids = set(session_ids)
     if not ids:
         return 0
     try:
-        raw = cursor_path.read_text()
-    except FileNotFoundError:
+        cursor = json.loads(cursor_path.read_text())
+    except (OSError, ValueError):
         return 0
-    try:
-        cursor = json.loads(raw)
-    except json.JSONDecodeError:
-        return 0
-    if not isinstance(cursor, dict):
-        return 0
-    def _save(new_cursor: dict) -> None:
-        ensure_dir(cursor_path.parent)
-        atomic_write_text(cursor_path, json.dumps(new_cursor))
-        harden_file_perms(cursor_path)
-
-    if _CURSOR_KEY not in cursor and _LEGACY_CURSOR_KEY in cursor:
-        # Wipe the legacy cursor entirely — we can't selectively evict because
-        # the old format lacks end_at; next sync re-pushes everything.
-        new_cursor = {k: v for k, v in cursor.items() if k != _LEGACY_CURSOR_KEY}
-        new_cursor[_CURSOR_KEY] = []
-        _save(new_cursor)
-        return 0
-    pushed = cursor.get(_CURSOR_KEY) or []
+    pushed = cursor.get(_CURSOR_KEY) if isinstance(cursor, dict) else None
     if not isinstance(pushed, list):
         return 0
-    kept: list[str] = []
-    removed = 0
-    for entry in pushed:
-        if not isinstance(entry, str):
-            continue
-        sid_part = entry.split("|", 1)[0]
-        if sid_part in ids:
-            removed += 1
-        else:
-            kept.append(entry)
+    entries = [e for e in pushed if isinstance(e, str)]
+    kept = [e for e in entries if e.split("|", 1)[0] not in ids]
+    removed = len(entries) - len(kept)
     if removed == 0:
         return 0
     cursor[_CURSOR_KEY] = sorted(kept)
-    _save(cursor)
+    _save_cursor(cursor, cursor_path)
     return removed
 
 
@@ -135,32 +100,16 @@ def collect_pending(sessions_file: Path, pushed: set[str]) -> list[dict[str, Any
     """Emit one pending dict per end event not yet in the cursor. Distinct
     end events for the same session_id (e.g. two /clear ends) produce
     separate pending dicts because server identity is (session_id, end_at)."""
-    if not sessions_file.exists():
-        return []
     pending: list[dict[str, Any]] = []
     for rec in load_jsonl(sessions_file):
-        if not isinstance(rec, dict):
-            continue
-        if rec.get("event") != "end":
-            continue
         sid = rec.get("session_id")
-        if not isinstance(sid, str):
+        if rec.get("event") != EVENT_END or not isinstance(sid, str):
             continue
         safe_sid = strip_control(sid, max_len=128)
-        if not safe_sid:
+        end_at = coerce_float(rec.get("timestamp_unix"))
+        if not safe_sid or not end_at or _event_key(safe_sid, end_at) in pushed:
             continue
-        try:
-            end_at = float(rec.get("timestamp_unix") or 0)
-        except (TypeError, ValueError):
-            continue
-        if not end_at:
-            continue
-        if _event_key(safe_sid, end_at) in pushed:
-            continue
-        try:
-            duration = float(rec.get("duration_seconds") or 0)
-        except (TypeError, ValueError):
-            duration = 0.0
+        duration = coerce_float(rec.get("duration_seconds"))
         start_at = end_at - duration
         pending.append(
             {
