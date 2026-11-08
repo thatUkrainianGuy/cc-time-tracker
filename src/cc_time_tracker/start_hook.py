@@ -10,6 +10,7 @@ from cc_time_tracker.common import (
     ensure_dir, harden_file_perms, acquire_lock, extract_project_name,
     load_jsonl, read_hook_input, coerce_float, coerce_int, strip_control, pid_alive,
 )
+from cc_time_tracker.active_time import measure, session_timestamps
 
 ORPHAN_THRESHOLD_SECONDS = 24 * 3600  # fallback for records without a pid
 HOOK_LOCK_TIMEOUT_SECONDS = 2  # leaves slack under CC's 5s hook timeout
@@ -32,6 +33,12 @@ def _cleanup_orphans(now_ts: float) -> tuple[list[dict], list[dict]]:
         else:
             is_orphan = now_ts - start_ts > ORPHAN_THRESHOLD_SECONDS
         if is_orphan:
+            sid = rec.get("session_id", "unknown")
+            cwd = rec.get("cwd", "")
+            timing = measure(
+                session_timestamps(str(sid), cwd if isinstance(cwd, str) else ""),
+                start_ts, now_ts,
+            )
             orphan_ends.append({
                 "event": EVENT_END,
                 "session_id": rec.get("session_id", "unknown"),
@@ -40,7 +47,7 @@ def _cleanup_orphans(now_ts: float) -> tuple[list[dict], list[dict]]:
                 "reason": REASON_ORPHAN_CLEANUP,
                 "timestamp": datetime.fromtimestamp(now_ts, tz=timezone.utc).isoformat(),
                 "timestamp_unix": now_ts,
-                "duration_seconds": round(now_ts - start_ts, 1),
+                **timing,
             })
         else:
             kept.append(rec)

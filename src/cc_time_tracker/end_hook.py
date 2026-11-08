@@ -10,6 +10,7 @@ from cc_time_tracker.common import (
     acquire_lock, extract_project_name, load_jsonl, read_hook_input,
     coerce_float, strip_control,
 )
+from cc_time_tracker.active_time import measure, session_timestamps
 
 HOOK_LOCK_TIMEOUT_SECONDS = 2
 
@@ -50,21 +51,24 @@ def main():
     cwd = strip_control(str(input_data.get("cwd", os.getcwd())), max_len=4096)
     reason = strip_control(str(input_data.get("reason", "unknown")), max_len=64)
 
+    transcript_path = input_data.get("transcript_path")
+
     now = datetime.now(timezone.utc)
     now_ts = now.timestamp()
+
+    # Parsed before taking the lock so a big transcript doesn't stall other hooks.
+    timestamps = session_timestamps(
+        session_id, cwd, transcript_path if isinstance(transcript_path, str) else None,
+    )
 
     with acquire_lock(timeout=HOOK_LOCK_TIMEOUT_SECONDS):
         start_record, remaining = find_and_remove_active(ACTIVE_FILE, session_id)
 
-        if start_record:
-            # coerce_float prevents a poisoned active.jsonl record (e.g.
-            # ``timestamp_unix: "x"``) from blowing up the SessionEnd hook.
-            start_ts = coerce_float(start_record.get("timestamp_unix"))
-            duration_seconds = now_ts - start_ts if start_ts else None
-            project = start_record.get("project") or extract_project_name(cwd)
-        else:
-            duration_seconds = None
-            project = extract_project_name(cwd)
+        # coerce_float prevents a poisoned active.jsonl record (e.g.
+        # ``timestamp_unix: "x"``) from blowing up the SessionEnd hook.
+        start_ts = coerce_float(start_record.get("timestamp_unix")) if start_record else 0.0
+        timing = measure(timestamps, start_ts, now_ts) if start_ts else {"duration_seconds": None}
+        project = (start_record or {}).get("project") or extract_project_name(cwd)
 
         record = {
             "event": EVENT_END,
@@ -74,7 +78,7 @@ def main():
             "reason": reason,
             "timestamp": now.isoformat(),
             "timestamp_unix": now_ts,
-            "duration_seconds": round(duration_seconds, 1) if duration_seconds is not None else None,
+            **timing,
         }
 
         with open(SESSIONS_FILE, "a") as f:

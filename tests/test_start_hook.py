@@ -93,7 +93,10 @@ def test_start_hook_cleans_orphans(tmp_path):
     orphan_end = [r for r in sess_records if r.get("reason") == "orphan_cleanup"]
     assert len(orphan_end) == 1
     assert orphan_end[0]["session_id"] == "orphan-1"
-    assert orphan_end[0]["duration_seconds"] > 24 * 3600
+    # No transcript on disk: wall time (> 24h) is capped and marked.
+    assert orphan_end[0]["wall_seconds"] > 24 * 3600
+    assert orphan_end[0]["duration_seconds"] == 4 * 3600
+    assert orphan_end[0]["active_source"] == "wall_capped"
 
     # Active should have: fresh-1 + new-1 (orphan removed)
     active_records = [json.loads(l) for l in active.read_text().strip().split("\n")]
