@@ -76,6 +76,17 @@ Meanwhile, another instance is running in ~/projects/api-server/
 
 Sessions are stored in `~/.claude/time-tracking/sessions.jsonl` (append-only JSONL).
 
+### Active time, not wall time
+
+A session left open while you do something else should not bill. `duration_seconds` is **active time**: the SessionEnd hook reads the event timestamps of the session's transcript (`~/.claude/projects/<slug>/<session_id>.jsonl` plus every subagent/workflow transcript under `<session_id>/`), keeps those inside the session window, and sums the gaps between them, each gap capped at 15 minutes (`CC_TIME_IDLE_CAP=<seconds>` to change). Each end record also stores `wall_seconds` (start → end) and `active_source`: `transcript`, or `wall_capped` when no transcript could be read, in which case wall time is billed up to 4 hours.
+
+To recompute older records (backs up `sessions.jsonl`, rewrites in place, and marks the changed sessions for re-sync):
+
+```bash
+cc-time-recompute --dry-run      # per-project wall vs active hours, writes nothing
+cc-time-recompute [--idle-cap N]
+```
+
 ### Project name resolution
 
 For each session, the project name is resolved by walking up from the session's `cwd` (stopping at `$HOME`) and using the first match:
@@ -97,10 +108,10 @@ All three track independently. The report sums A+C under "my-app" and B under "a
 
 ## Edge Cases
 
-- **Crashed sessions** (no SessionEnd): Auto-cleaned on the next SessionStart. Each active session records its parent pid; if that process is gone, the session is closed out as a completed record (`reason: "orphan_cleanup"`, duration = start → cleanup time) and *does* count in totals. Records without a pid (legacy) fall back to a 24h age threshold. View leftovers with `cc-time-report orphans`.
+- **Crashed sessions** (no SessionEnd): Auto-cleaned on the next SessionStart. Each active session records its parent pid; if that process is gone, the session is closed out as a completed record (`reason: "orphan_cleanup"`, window = start → cleanup time, billed as active time) and *does* count in totals. Records without a pid (legacy) fall back to a 24h age threshold. View leftovers with `cc-time-report orphans`.
 - **`/clear` or context compaction**: SessionStart fires again with `source: "clear"` or `"compact"`. The existing active session is effectively re-started.
 - **`/resume`**: SessionStart fires with `source: "resume"`. Tracked as a new timing segment.
-- **Timeout safety**: Both hooks have 5s timeout (SessionEnd default is only 1.5s — we override it). Writing JSONL is <1ms.
+- **Timeout safety**: Both hooks have 5s timeout (SessionEnd default is only 1.5s — we override it). Writing JSONL is <1ms; reading transcript timestamps takes ~0.1s per 15 MB and happens before the lock is taken.
 
 ## Optional: Menu Bar App (macOS)
 
