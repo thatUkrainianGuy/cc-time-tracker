@@ -15,7 +15,7 @@ from pathlib import Path
 from cc_time_tracker.common import coerce_int
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
-IDLE_CAP_SECONDS = coerce_int(os.environ.get("CC_TIME_IDLE_CAP"), 900) or 900
+IDLE_CAP_SECONDS = max(coerce_int(os.environ.get("CC_TIME_IDLE_CAP"), 900) or 900, 1)
 WALL_CAP_SECONDS = 4 * 3600  # billed when no transcript can be read
 SOURCE_TRANSCRIPT = "transcript"
 SOURCE_WALL_CAPPED = "wall_capped"
