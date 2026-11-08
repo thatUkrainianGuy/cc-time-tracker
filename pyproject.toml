@@ -24,6 +24,7 @@ cc-time-setup = "cc_time_tracker.setup_cmd:main"
 cc-time-uninstall = "cc_time_tracker.uninstall_cmd:main"
 cc-time-sync = "cc_time_tracker.sync:main"
 cc-time-sync-install = "cc_time_tracker.sync_install:main"
+cc-time-recompute = "cc_time_tracker.recompute:main"
 
 [project.urls]
 Homepage = "https://github.com/riabchuk/cc-time-tracker"
