@@ -270,3 +270,16 @@ def test_evict_empty_ids_is_noop(workdir):
     assert removed == 0
     cur = json.loads(cursor.read_text())
     assert cur["pushed_events"] == [_key("a", 1.0)]
+
+
+def test_start_at_uses_wall_seconds_not_active_duration(workdir):
+    write_sessions(workdir / "sessions.jsonl", [
+        {"event": "end", "session_id": "a", "project": "x", "timestamp_unix": 10_000.0,
+         "duration_seconds": 600.0, "wall_seconds": 7200.0, "active_source": "transcript"},
+        # Legacy record: no wall_seconds, duration is wall time.
+        {"event": "end", "session_id": "b", "project": "x", "timestamp_unix": 10_000.0,
+         "duration_seconds": 300.0},
+    ])
+    a, b = sync.collect_pending(workdir / "sessions.jsonl", set())
+    assert (a["start_at"], a["duration_seconds"]) == (2800.0, 600.0)
+    assert (b["start_at"], b["duration_seconds"]) == (9700.0, 300.0)

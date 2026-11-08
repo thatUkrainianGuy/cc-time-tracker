@@ -110,7 +110,9 @@ def collect_pending(sessions_file: Path, pushed: set[str]) -> list[dict[str, Any
         if not safe_sid or not end_at or _event_key(safe_sid, end_at) in pushed:
             continue
         duration = coerce_float(rec.get("duration_seconds"))
-        start_at = end_at - duration
+        # duration is active time; the window start is end minus wall time.
+        # Records from before active time have no wall_seconds and duration == wall.
+        start_at = end_at - coerce_float(rec.get("wall_seconds"), default=duration)
         pending.append(
             {
                 "session_id": safe_sid,
