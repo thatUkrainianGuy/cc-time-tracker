@@ -131,6 +131,36 @@ Features:
 - Delete a project's sessions
 - Export reports as CSV or Markdown
 
+## Optional: Sync to a server
+
+`cc-time-sync` pushes every end event to one or more HTTP endpoints as `POST {"sessions": [{session_id, tracker_name, start_at, end_at, duration_seconds}]}` with `Authorization: Bearer <key>`. The server must be idempotent on `(session_id, end_at)`. Config lives in `~/.claude/time-tracking/sync-config.json`:
+
+```json
+{
+  "endpoint": "https://portal.example/api/sync", "api_key": "...",
+  "targets": [
+    {"name": "dashboard", "endpoint": "https://dash.example/api/sync",
+     "api_key_file": "~/.config/dash/sync-key",
+     "include": ["projectA", "projectB"]}
+  ]
+}
+```
+
+- Top-level `endpoint`/`api_key` is the target `portal` (no filter); a config with only those keys still works as before.
+- `api_key_file` (chmod 600, `~` expanded) can replace `api_key`.
+- `include` lists exact tracker names; other projects are dropped before the request body is built. Leave it out to send everything.
+- Endpoints must be `https://` (plain `http://` only for localhost).
+- One cursor per target in `sync-cursor.json`: `portal` keeps the top-level `pushed_events`, the others go under `targets.<name>.pushed_events`.
+- A failing target doesn't stop the others; the exit code is non-zero if any target failed.
+
+```bash
+cc-time-sync --dry-run                 # what each target would receive
+cc-time-sync --target dashboard        # one target only
+cc-time-sync --target dashboard --reset  # forget that target's cursor and resend
+```
+
+Merging or deleting a project, and `cc-time-recompute`, evict the affected sessions from every target's cursor, so they get re-pushed.
+
 ## Uninstall
 
 ```bash

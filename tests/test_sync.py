@@ -146,12 +146,12 @@ def test_dry_run_does_not_post(workdir):
     assert not (workdir / "sync-cursor.json").exists()
 
 
-def test_rejects_plain_http_endpoint(workdir):
+def test_rejects_plain_http_endpoint(workdir, capsys):
     (workdir / "sync-config.json").write_text(
         json.dumps({"endpoint": "http://example.test/api/sync", "api_key": "k"})
     )
-    with pytest.raises(SystemExit, match="endpoint must be https"):
-        sync.run_once(dry_run=True)
+    assert sync.run_once(dry_run=True) == 2
+    assert "endpoint must be https" in capsys.readouterr().err
 
 
 def test_allows_localhost_http_endpoint(workdir):
@@ -162,12 +162,12 @@ def test_allows_localhost_http_endpoint(workdir):
     assert rc == 0
 
 
-def test_rejects_placeholder_api_key(workdir):
+def test_rejects_placeholder_api_key(workdir, capsys):
     (workdir / "sync-config.json").write_text(
         json.dumps({"endpoint": "https://example.test/api/sync", "api_key": "REPLACE_ME"})
     )
-    with pytest.raises(SystemExit, match="missing api_key"):
-        sync.run_once(dry_run=True)
+    assert sync.run_once(dry_run=True) == 2
+    assert "missing api_key" in capsys.readouterr().err
 
 
 def test_collect_pending_sanitizes_uploaded_identifiers(workdir):
@@ -283,3 +283,157 @@ def test_start_at_uses_wall_seconds_not_active_duration(workdir):
     a, b = sync.collect_pending(workdir / "sessions.jsonl", set())
     assert (a["start_at"], a["duration_seconds"]) == (2800.0, 600.0)
     assert (b["start_at"], b["duration_seconds"]) == (9700.0, 300.0)
+
+
+# ── multiple targets ───────────────────────────────────────────────────────
+
+UNI = "https://unicorni.sh/api/sync"
+PORTAL = "https://example.test/api/sync"
+
+
+def _end(sid, project, t):
+    return {"event": "end", "session_id": sid, "project": project,
+            "timestamp_unix": t, "duration_seconds": 10.0}
+
+
+@pytest.fixture
+def multi(workdir):
+    key = workdir / "uni-key"
+    key.write_text("uni-secret\n")
+    key.chmod(0o600)
+    (workdir / "sync-config.json").write_text(json.dumps({
+        "endpoint": PORTAL, "api_key": "k",
+        "targets": [{"name": "unicornish", "endpoint": UNI, "api_key_file": str(key),
+                     "include": ["heerish", "mcxfirstcohort", "Peerish"]}],
+    }))
+    write_sessions(workdir / "sessions.jsonl", [
+        _end("a", "heerish", 100.0), _end("b", "AcmeClient", 200.0),
+        _end("c", "Peerish", 300.0), _end("d", "peerish", 400.0),
+    ])
+    return workdir
+
+
+def _ok():
+    return MagicMock(status=200)
+
+
+def _bodies(post, url):
+    return [c.args[1] for c in post.call_args_list if c.args[0] == url]
+
+
+def test_legacy_config_is_portal_target_without_filter(workdir):
+    write_sessions(workdir / "sessions.jsonl", [_end("a", "AcmeClient", 1.0)])
+    with patch.object(sync, "_http_post", return_value=_ok()) as post:
+        assert sync.run_once() == 0
+    assert [c.args[0] for c in post.call_args_list] == [PORTAL]
+    cur = json.loads((workdir / "sync-cursor.json").read_text())
+    assert cur == {"pushed_events": [_key("a", 1.0)]}
+
+
+def test_include_filter_on_the_wire(multi):
+    with patch.object(sync, "_http_post", return_value=_ok()) as post:
+        assert sync.run_once() == 0
+    (uni_body,) = _bodies(post, UNI)
+    assert b"AcmeClient" not in uni_body and b"peerish" not in uni_body  # exact, case-sensitive
+    names = {s["tracker_name"] for s in json.loads(uni_body)["sessions"]}
+    assert names == {"heerish", "Peerish"}
+    assert post.call_args_list[1].kwargs["headers"]["Authorization"] == "Bearer uni-secret"
+    (portal_body,) = _bodies(post, PORTAL)
+    assert len(json.loads(portal_body)["sessions"]) == 4
+
+
+def test_per_target_cursor_and_lossless_migration(multi):
+    old = {"pushed_events": [_key("a", 100.0), _key("zz", 1.0)], "extra": 1}
+    (multi / "sync-cursor.json").write_text(json.dumps(old))
+    with patch.object(sync, "_http_post", return_value=_ok()) as post:
+        assert sync.run_once() == 0
+    cur = json.loads((multi / "sync-cursor.json").read_text())
+    assert set(old["pushed_events"]) <= set(cur["pushed_events"])  # nothing lost
+    assert cur["extra"] == 1
+    assert len(json.loads(_bodies(post, PORTAL)[0])["sessions"]) == 3  # "a" not re-pushed
+    assert cur["targets"]["unicornish"]["pushed_events"] == [_key("a", 100.0), _key("c", 300.0)]
+    with patch.object(sync, "_http_post", return_value=_ok()) as post:
+        assert sync.run_once() == 0
+    post.assert_not_called()
+
+
+def test_one_target_failing_does_not_block_others(multi):
+    def post(url, data, headers):
+        if url == PORTAL:
+            raise sync.urllib.error.URLError("down")
+        return _ok()
+    with patch.object(sync, "_http_post", side_effect=post):
+        assert sync.run_once() == 3
+    cur = json.loads((multi / "sync-cursor.json").read_text())
+    assert cur["pushed_events"] == []
+    assert len(cur["targets"]["unicornish"]["pushed_events"]) == 2
+
+
+def test_bad_target_config_does_not_block_others(multi, capsys):
+    (multi / "uni-key").unlink()
+    with patch.object(sync, "_http_post", return_value=_ok()) as post:
+        assert sync.run_once() == 2
+    assert [c.args[0] for c in post.call_args_list] == [PORTAL]
+    assert "[unicornish] cannot read api_key_file" in capsys.readouterr().err
+
+
+def test_api_key_file_must_be_private(multi, capsys):
+    (multi / "uni-key").chmod(0o644)
+    with patch.object(sync, "_http_post", return_value=_ok()) as post:
+        assert sync.run_once(only="unicornish") == 2
+    post.assert_not_called()
+    assert "chmod 600" in capsys.readouterr().err
+
+
+def test_api_key_file_expands_home(multi, monkeypatch):
+    monkeypatch.setenv("HOME", str(multi))
+    cfg = json.loads((multi / "sync-config.json").read_text())
+    cfg["targets"][0]["api_key_file"] = "~/uni-key"
+    (multi / "sync-config.json").write_text(json.dumps(cfg))
+    with patch.object(sync, "_http_post", return_value=_ok()) as post:
+        assert sync.run_once(only="unicornish") == 0
+    assert post.call_args.kwargs["headers"]["Authorization"] == "Bearer uni-secret"
+
+
+def test_target_flag_and_per_target_dry_run(multi, capsys):
+    with patch.object(sync, "_http_post") as post:
+        assert sync.run_once(dry_run=True, only="unicornish") == 0
+    post.assert_not_called()
+    out = capsys.readouterr().out
+    assert "[unicornish] would push 2 session(s)" in out and "AcmeClient" not in out
+    assert "[portal]" not in out
+    with pytest.raises(SystemExit, match="no target named"):
+        sync.run_once(only="nope")
+
+
+def test_reset_only_touches_selected_target(multi):
+    (multi / "sync-cursor.json").write_text(json.dumps({
+        "pushed_events": [_key("a", 100.0)],
+        "targets": {"unicornish": {"pushed_events": [_key("a", 100.0)]}},
+    }))
+    with patch.object(sync, "_http_post"):
+        sync.run_once(dry_run=True, only="unicornish", reset=True)
+    cur = json.loads((multi / "sync-cursor.json").read_text())
+    assert cur["pushed_events"] == [_key("a", 100.0)]
+    assert cur["targets"]["unicornish"]["pushed_events"] == []
+
+
+def test_duplicate_target_names_rejected(workdir):
+    (workdir / "sync-config.json").write_text(json.dumps({
+        "endpoint": PORTAL, "api_key": "k",
+        "targets": [{"name": "portal", "endpoint": UNI, "api_key": "x"}],
+    }))
+    with pytest.raises(SystemExit, match="unique name"):
+        sync.run_once(dry_run=True)
+
+
+def test_evict_covers_every_target_cursor(tmp_path):
+    cursor = tmp_path / "sync-cursor.json"
+    cursor.write_text(json.dumps({
+        "pushed_events": [_key("a", 1.0), _key("b", 2.0)],
+        "targets": {"unicornish": {"pushed_events": [_key("a", 1.0), _key("c", 3.0)]}},
+    }))
+    assert sync.evict_session_ids_from_cursor(cursor, ["a"]) == 2
+    cur = json.loads(cursor.read_text())
+    assert cur["pushed_events"] == [_key("b", 2.0)]
+    assert cur["targets"]["unicornish"]["pushed_events"] == [_key("c", 3.0)]

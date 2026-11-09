@@ -44,7 +44,8 @@ def env(tmp_path, monkeypatch, _isolated_projects_dir):
     ]
     sessions.write_text("".join(json.dumps(r) + "\n" for r in records))
     cursor.write_text(json.dumps({"pushed_events": [
-        f"a|{T0 + 1800}", f"a|{T0 + 7200}", f"b|{T0 + 36000}", "z|1.0"]}))
+        f"a|{T0 + 1800}", f"a|{T0 + 7200}", f"b|{T0 + 36000}", "z|1.0"],
+        "targets": {"unicornish": {"pushed_events": [f"a|{T0 + 1800}", "z|1.0"]}}}))
     return sessions, cursor
 
 
@@ -76,7 +77,9 @@ def test_backfill_rewrites_windows_backs_up_and_evicts(env):
 
     [backup] = sessions.parent.glob("sessions.jsonl.bak-*")
     assert backup.read_text() == original
-    assert json.loads(cursor.read_text())["pushed_events"] == ["z|1.0"]
+    cur = json.loads(cursor.read_text())
+    assert cur["pushed_events"] == ["z|1.0"]
+    assert cur["targets"]["unicornish"]["pushed_events"] == ["z|1.0"]
     # The re-push sends the original window start, not end - active.
     pending = {p["end_at"]: p for p in sync.collect_pending(sessions, set())}
     assert pending[T0 + 7200]["start_at"] == T0 + 1800
